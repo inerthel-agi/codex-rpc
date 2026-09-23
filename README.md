@@ -41,7 +41,7 @@
 
 Download the latest release:
 
-https://github.com/stealthsrc/codex-rpc/releases/latest
+https://github.com/inerthel-agi/codex-rpc/releases/latest
 
 Recommended asset:
 

@@ -2,7 +2,7 @@
 name = "codex_rich_presence_tray"
 version = "0.3.23"
 description = "Codex RPC"
-authors = ["StealthyLabs"]
+authors = ["Inerthel"]
 license = "MIT"
 edition = "2021"
 

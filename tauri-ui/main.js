@@ -4,7 +4,7 @@ const appWindow = window.__TAURI__.window.getCurrentWindow();
 const presets = {
   codex: ['Open Codex', 'https://chatgpt.com/codex'],
   usage: ['Usage', 'https://chatgpt.com/codex/settings/analytics'],
-  repo: ['GitHub repo', 'https://github.com/stealthsrc/codex-rpc'],
+  repo: ['GitHub repo', 'https://github.com/inerthel-agi/codex-rpc'],
 };
 
 const fields = {

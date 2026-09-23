@@ -30,7 +30,7 @@
       "assets/app.ico"
     ]
   },
-  "author": "StealthyLabs",
+  "author": "Inerthel",
   "license": "MIT",
   "dependencies": {
     "@xhayper/discord-rpc": "^1.2.0",

@@ -1,16 +1,14 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Codex RPC</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="./styles.css" />
-    <script defer src="./main.js"></script>
-  </head>
-  <body>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Codex RPC</title>
+  <link rel="stylesheet" href="./styles.css" />
+  <script defer src="./usage.js"></script>
+  <script defer src="./main.js"></script>
+</head>
+<body>
     <div class="titlebar" data-tauri-drag-region>
       <img class="titlebar-logo" src="./codex_logo.png" alt="" />
       <div class="titlebar-controls">
@@ -25,160 +23,49 @@
         </button>
       </div>
     </div>
-    <main class="shell">
-      <header class="topbar">
-        <div class="title-row">
-          <h1>Codex RPC</h1>
-          <div class="theme-switch" aria-label="Theme">
-            <button type="button" data-theme-option="dark">Dark</button>
-            <button type="button" data-theme-option="system">System</button>
-            <button type="button" data-theme-option="light">Light</button>
-          </div>
-        </div>
-        <p id="status" class="status">Codex: Off</p>
-      </header>
-
-      <section class="panel">
-        <div class="legend">
-          <span>Buttons</span>
-          <svg class="chevron" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="6 9 12 15 18 9"></polyline>
-          </svg>
-        </div>
-        <div class="panel-content">
-          <p class="panel-note">Discord Nitro required to display these buttons on your profile. Non-Nitro users won't see them.</p>
-          <div class="grid head">
-            <span>Slot</span>
-            <span>Label</span>
-            <span>URL</span>
-          </div>
-          <div class="grid">
-            <label>Button 1</label>
-            <input id="label0" maxlength="32" spellcheck="false" />
-            <input id="url0" spellcheck="false" />
-          </div>
-          <div class="grid">
-            <label>Button 2</label>
-            <input id="label1" maxlength="32" spellcheck="false" />
-            <input id="url1" spellcheck="false" />
-          </div>
-        </div>
-      </section>
-
-      <section class="panel">
-        <div class="legend">
-          <span>Mode</span>
-          <svg class="chevron" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="6 9 12 15 18 9"></polyline>
-          </svg>
-        </div>
-        <div class="panel-content">
-          <div class="setting-row">
-            <div class="setting-info">
-              <label for="mode">IPC Mode</label>
-              <p id="hint">Buttons are sent only in Watching mode (Discord Nitro required to render them).</p>
-            </div>
-            <div class="setting-control">
-              <select id="mode">
-                <option value="playing">Playing</option>
-                <option value="watching">Watching (TV)</option>
-                <option value="listening">Listening</option>
-                <option value="competing">Competing</option>
-              </select>
-            </div>
-          </div>
-
-          <div class="setting-row">
-            <div class="setting-info">
-              <label>Usage</label>
-              <p>Choose usage limits shown in status and Discord RPC.</p>
-            </div>
-            <div class="setting-control">
-              <div class="switch-row">
-                <button type="button" id="usage-5h-toggle" class="toggle" aria-pressed="true">5h on</button>
-                <button type="button" id="usage-week-toggle" class="toggle" aria-pressed="true">Week on</button>
-                <button type="button" id="usage-spark-5h-toggle" class="toggle" aria-pressed="true">Spark 5h on</button>
-                <button type="button" id="usage-spark-week-toggle" class="toggle" aria-pressed="true" title="Show Spark weekly usage">Spark week on</button>
-              </div>
-            </div>
-          </div>
-
-          <div class="setting-row">
-            <div class="setting-info">
-              <label>Display</label>
-              <p>Hide effort label or credits counter independently.</p>
-            </div>
-            <div class="setting-control">
-              <div class="switch-row">
-                <button type="button" id="effort-toggle" class="toggle" aria-pressed="true">Effort on</button>
-                <button type="button" id="fast-mode-toggle" class="toggle" aria-pressed="true" title="Show Fast or Standard speed in Discord RPC">Fast mode on</button>
-                <button type="button" id="credits-toggle" class="toggle" aria-pressed="true">Credits on</button>
-              </div>
-            </div>
-          </div>
-
-          <div class="setting-row">
-            <div class="setting-info">
-              <label>Cost &amp; tokens</label>
-              <p>Estimated spend and token counts for the current project or all projects. Off by default.</p>
-            </div>
-            <div class="setting-control">
-              <div class="switch-row">
-                <button type="button" id="cost-toggle" class="toggle" aria-pressed="false" title="Show estimated spend for the current project">Project cost off</button>
-                <button type="button" id="cost-total-toggle" class="toggle" aria-pressed="false" title="Show estimated spend across all projects">All cost off</button>
-                <button type="button" id="project-tokens-toggle" class="toggle" aria-pressed="false" title="Show token counts for the current project">Project tokens off</button>
-                <button type="button" id="all-tokens-toggle" class="toggle" aria-pressed="false" title="Show token counts across all projects">All tokens off</button>
-              </div>
-            </div>
-          </div>
-
-          <div class="setting-row">
-            <div class="setting-info">
-              <label>Always on</label>
-              <p>Keep RPC active and rate limits visible when no Codex process is running (useful for third-party agents).</p>
-            </div>
-            <div class="setting-control">
-              <div class="switch-row single">
-                <button type="button" id="always-on-toggle" class="toggle" aria-pressed="false">Off</button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section class="panel preview-panel">
-        <div class="legend">
-          <span>Preview</span>
-          <svg class="chevron" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="6 9 12 15 18 9"></polyline>
-          </svg>
-        </div>
-        <div class="panel-content">
-          <div class="rpc-preview">
-            <img class="preview-icon" src="./codex_logo.png" alt="" />
-            <div class="preview-copy">
-              <strong id="preview-activity">Playing Codex</strong>
-              <span id="preview-details">Coding with Codex CLI</span>
-              <span id="preview-state">Codex: Off</span>
-              <div id="preview-buttons" class="preview-buttons"></div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section class="panel presets">
-        <div class="legend">Presets</div>
-        <button type="button" data-preset="codex">Open Codex</button>
-        <button type="button" data-preset="usage">Usage</button>
-        <button type="button" data-preset="repo">GitHub repo</button>
-      </section>
-
-      <footer>
-        <button type="button" id="clear" class="ghost">Clear</button>
-        <span id="message"></span>
-        <button type="button" id="apply">Apply</button>
-        <button type="button" id="close" class="primary">Close</button>
-      </footer>
-    </main>
-  </body>
+  <main class="shell">
+    <header class="topbar">
+      <div><h1>Codex RPC</h1><p id="status" class="status">Waiting for Codex</p></div>
+      <div class="theme-switch" aria-label="Theme">
+        <button type="button" data-theme-option="dark">Dark</button>
+        <button type="button" data-theme-option="system">System</button>
+        <button type="button" data-theme-option="light">Light</button>
+      </div>
+    </header>
+    <section class="usage-panel" aria-labelledby="usage-title">
+      <div class="section-heading"><h2 id="usage-title">Usage</h2><span id="plan" class="plan">Subscription</span></div>
+      <div id="usage" class="usage"><p class="usage-empty">Waiting for Codex usage…</p></div>
+      <p class="note" id="plan-hint">Limits update automatically from your Codex account.</p>
+    </section>
+    <section class="settings-section" aria-labelledby="presence-title">
+      <h2 id="presence-title">Discord presence</h2>
+      <div class="setting-row">
+        <label for="mode">Activity</label>
+        <select id="mode"><option value="playing">Playing</option><option value="watching">Watching</option><option value="listening">Listening</option><option value="competing">Competing</option></select>
+      </div>
+      <div class="setting-row"><span>Usage on your profile</span><div class="checks">
+        <label id="usage-5h-option"><input type="checkbox" id="usage-5h-toggle" />5 hours</label>
+        <label><input type="checkbox" id="usage-week-toggle" />Week</label>
+      </div></div>
+      <div class="setting-row"><span>Details</span><div class="checks">
+        <label><input type="checkbox" id="effort-toggle" />Effort</label>
+        <label><input type="checkbox" id="fast-mode-toggle" />Fast mode</label>
+        <label><input type="checkbox" id="credits-toggle" />Credits</label>
+      </div></div>
+      <div class="rpc-preview" aria-label="Discord preview">
+        <img class="preview-icon" src="./codex_logo.png" alt="" />
+        <div class="preview-copy"><strong id="preview-activity">Playing Codex</strong><span id="preview-details">No Codex activity</span><span id="preview-state">—</span><div id="preview-buttons" class="preview-buttons"></div></div>
+        <span class="preview-tag">PREVIEW</span>
+      </div>
+    </section>
+    <details class="links-section">
+      <summary>Profile buttons <span>Optional · Watching mode</span></summary>
+      <p class="note">Links are sent to Discord in Watching mode.</p>
+      <div class="link-row"><label for="label0">Button 1</label><input id="label0" maxlength="32" aria-label="Button 1 label" placeholder="Label" /><input id="url0" type="url" aria-label="Button 1 URL" placeholder="https://…" /></div>
+      <div class="link-row"><label for="label1">Button 2</label><input id="label1" maxlength="32" aria-label="Button 2 label" placeholder="Label" /><input id="url1" type="url" aria-label="Button 2 URL" placeholder="https://…" /></div>
+      <div class="presets"><button type="button" data-preset="codex">Open Codex</button><button type="button" data-preset="usage">Usage</button><button type="button" data-preset="repo">GitHub repo</button><button type="button" id="clear" class="ghost">Clear</button></div>
+    </details>
+  </main>
+  <footer class="actions"><span id="message" role="status">Changes save automatically</span><button type="button" id="apply">Apply</button><button type="button" id="close" class="primary">Close</button></footer>
+</body>
 </html>

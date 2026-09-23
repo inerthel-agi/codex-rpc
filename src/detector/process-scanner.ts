@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { getLogger } from '../utils/logger';
 
 export interface RawProcess {
+  owner?: 'app' | 'ignored';
   processId: number;
   parentProcessId: number;
   executablePath: string | null;
@@ -19,7 +20,17 @@ const PS_COMMAND =
   '$procs = Get-CimInstance Win32_Process;' +
   '$index = @{};' +
   'foreach ($p in $procs) { $index[[int]$p.ProcessId] = $p.Name };' +
-  "$procs | Where-Object { $_.Name -eq 'codex.exe' } | ForEach-Object { [PSCustomObject]@{" +
+  '$parents = @{}; foreach ($p in $procs) { $parents[[int]$p.ProcessId] = $p };' +
+  "$procs | Where-Object { $_.Name -eq 'codex.exe' } | ForEach-Object {" +
+  '$owner = $null; $ancestor = [int]$_.ParentProcessId;' +
+  'for ($i = 0; $i -lt $procs.Count; $i++) {' +
+  `  if ($ancestor -eq ${process.pid}) { $owner = 'ignored'; break };` +
+  '  $p = $parents[$ancestor]; if ($null -eq $p) { break };' +
+  "  if ($p.Name -in @('codex-rich-presence.exe', 'codex_rich_presence_tray.exe')) { $owner = 'ignored'; break };" +
+  "  if ($p.Name -eq 'ChatGPT.exe') { $owner = 'app'; break };" +
+  '  $ancestor = [int]$p.ParentProcessId;' +
+  '}; [PSCustomObject]@{' +
+  '  Owner           = $owner;' +
   '  ProcessId       = $_.ProcessId;' +
   '  ParentProcessId = $_.ParentProcessId;' +
   '  ExecutablePath  = $_.ExecutablePath;' +
@@ -57,6 +68,7 @@ function normalize(entry: Record<string, unknown>): RawProcess | null {
   const pid = entry.ProcessId;
   if (typeof pid !== 'number') return null;
   return {
+    owner: entry.Owner === 'app' || entry.Owner === 'ignored' ? entry.Owner : undefined,
     processId: pid,
     parentProcessId: typeof entry.ParentProcessId === 'number' ? entry.ParentProcessId : -1,
     executablePath: typeof entry.ExecutablePath === 'string' ? entry.ExecutablePath : null,
@@ -83,6 +95,7 @@ export function parseScanOutput(stdout: string): RawProcess[] {
 }
 
 export interface ProcessSnapshot {
+  owner?: 'app' | 'ignored';
   processId: number;
   parentProcessId: number;
   parentName: string | null;
@@ -107,6 +120,7 @@ export async function scanCodexProcesses(options: ScannerOptions = {}): Promise<
   log.debug({ count: processes.length }, 'scanner: codex.exe processes found');
 
   return processes.map((p) => ({
+    owner: p.owner,
     processId: p.processId,
     parentProcessId: p.parentProcessId,
     parentName: p.parentName,

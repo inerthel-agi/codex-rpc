@@ -83,6 +83,34 @@ describe('parseCodexConfig', () => {
       serviceTier: null,
     });
   });
+
+  it('prefers config.toml when it is newer than the last turn context', () => {
+    const configPath = path.join(root, 'config.toml');
+    const sessionsRoot = path.join(root, 'sessions');
+    const rolloutPath = path.join(sessionsRoot, 'rollout-a.jsonl');
+    fs.mkdirSync(sessionsRoot, { recursive: true });
+    fs.writeFileSync(
+      rolloutPath,
+      JSON.stringify({
+        timestamp: '2026-07-09T18:00:59.694Z',
+        type: 'turn_context',
+        payload: { model: 'gpt-5.6-sol', effort: 'ultra' },
+      }) + '\n',
+    );
+    // /model rewrote config.toml two minutes after the last turn started.
+    fs.writeFileSync(
+      configPath,
+      ['model = "gpt-5.6-terra"', 'model_reasoning_effort = "max"'].join('\n'),
+    );
+    const configMtime = new Date('2026-07-09T18:02:58.000Z');
+    fs.utimesSync(configPath, configMtime, configMtime);
+
+    expect(readCodexConfig(configPath, sessionsRoot)).toEqual({
+      model: 'gpt-5.6-terra',
+      effort: 'max',
+      serviceTier: null,
+    });
+  });
 });
 
 describe('formatEffort', () => {
@@ -92,6 +120,8 @@ describe('formatEffort', () => {
     expect(formatEffort('medium')).toBe('Medium');
     expect(formatEffort('low')).toBe('Low');
     expect(formatEffort('minimal')).toBe('Minimal');
+    expect(formatEffort('ultra')).toBe('Ultra');
+    expect(formatEffort('max')).toBe('Max');
   });
 
   it('falls back to the raw value when unknown', () => {
@@ -108,6 +138,9 @@ describe('formatModel', () => {
     expect(formatModel('gpt-5.4')).toBe('GPT-5.4');
     expect(formatModel('gpt-5.3-codex')).toBe('GPT-5.3-Codex');
     expect(formatModel('gpt-5.2-codex-mini')).toBe('GPT-5.2-Codex-Mini');
+    expect(formatModel('gpt-5.6-sol')).toBe('GPT-5.6-Sol');
+    expect(formatModel('gpt-5.6-terra')).toBe('GPT-5.6-Terra');
+    expect(formatModel('gpt-5.6-luna')).toBe('GPT-5.6-Luna');
   });
 
   it('null passthrough', () => {

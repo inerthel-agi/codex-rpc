@@ -16,10 +16,6 @@ export interface CodexUsageSnapshot {
   secondary: CodexLimitSnapshot | null;
   creditsRemaining: number | null;
   planType: string | null;
-  sparkLimitId: string | null;
-  sparkLabel: string | null;
-  sparkPrimary: CodexLimitSnapshot | null;
-  sparkSecondary: CodexLimitSnapshot | null;
   lastActivityMs: number;
 }
 
@@ -40,40 +36,15 @@ export function readLatestCodexUsage(
     refreshLocalCodexUsage();
   }
 
-  const files = findRecentRolloutFiles(root, maxAgeMs);
-  let codex: CodexUsageSnapshot | null = null;
-  let spark: CodexUsageSnapshot | null = null;
-  let fallback: CodexUsageSnapshot | null = null;
-  for (const file of files) {
+  for (const file of findRecentRolloutFiles(root, maxAgeMs)) {
     const lines = readTailLines(file.path);
     if (!lines) continue;
-
     for (let i = lines.length - 1; i >= 0; i--) {
       const usage = parseUsageLine(lines[i], file.mtimeMs);
-      if (!usage) continue;
-      if (usage.limitId === 'codex') {
-        codex ??= usage;
-      } else if (
-        usage.limitId &&
-        (usage.limitId.startsWith('codex_') || usage.limitId.toLowerCase().includes('spark'))
-      ) {
-        spark ??= usage;
-      } else {
-        fallback ??= usage;
-      }
-      if (codex && spark) break;
+      if (usage && (!usage.limitId || usage.limitId === 'codex')) return usage;
     }
-    if (codex && spark) break;
   }
-  const result = codex ?? fallback;
-  if (!result) return null;
-  if (spark) {
-    result.sparkLimitId = spark.limitId;
-    result.sparkLabel = null;
-    result.sparkPrimary = spark.primary;
-    result.sparkSecondary = spark.secondary;
-  }
-  return result;
+  return null;
 }
 
 function refreshLocalCodexUsage(): void {
@@ -122,11 +93,16 @@ function scheduleAccountUsageRefresh(): void {
 async function refreshCodexAccountUsage(): Promise<CodexUsageSnapshot | null> {
   const initRequest =
     '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"clientInfo":{"name":"codex-rpc","version":"0"}}}\n';
+  // Codex 0.144+ rejects requests sent before the `initialized` notification.
+  const initializedNotification = '{"jsonrpc":"2.0","method":"initialized"}\n';
   const readRequest =
     '{"jsonrpc":"2.0","id":1,"method":"account/rateLimits/read","params":null}\n';
 
   for (const command of codexCommandCandidates()) {
-    const stdout = await runAppServerProbe(command, initRequest + readRequest);
+    const stdout = await runAppServerProbe(
+      command,
+      initRequest + initializedNotification + readRequest,
+    );
     if (!stdout) continue;
     const usage = parseAccountUsageResponse(stdout, Date.now());
     if (usage) return usage;
@@ -263,52 +239,32 @@ function parseAccountUsagePayload(
   if (!limits || typeof limits !== 'object') return null;
 
   const record = limits as Record<string, unknown>;
-  let sparkLimitId: string | null = null;
-  let sparkLabel: string | null = null;
-  let sparkPrimary: CodexLimitSnapshot | null = null;
-  let sparkSecondary: CodexLimitSnapshot | null = null;
-  if (byLimitId) {
-    for (const [key, value] of Object.entries(byLimitId)) {
-      if (key === 'codex') continue;
-      if (!value || typeof value !== 'object') continue;
-      const entry = value as Record<string, unknown>;
-      const name = typeof entry.limitName === 'string' ? entry.limitName : null;
-      if (!name || !name.toLowerCase().includes('spark')) continue;
-      sparkLimitId = key;
-      sparkLabel = name;
-      sparkPrimary = parseAccountLimit(entry.primary, observedAtMs);
-      sparkSecondary = parseAccountLimit(entry.secondary, observedAtMs);
-      break;
-    }
-  }
   return {
     limitId: typeof record.limitId === 'string' ? record.limitId : null,
     primary: parseAccountLimit(record.primary, observedAtMs),
     secondary: parseAccountLimit(record.secondary, observedAtMs),
     creditsRemaining: parseCredits(record.credits),
     planType: typeof record.planType === 'string' ? record.planType : null,
-    sparkLimitId,
-    sparkLabel,
-    sparkPrimary,
-    sparkSecondary,
     lastActivityMs: observedAtMs,
   };
 }
 
+export function visibleUsageLimits(usage: CodexUsageSnapshot | null): { label: string; limit: CodexLimitSnapshot }[] {
+  if (!usage) return [];
+  const pro = usage.planType?.toLowerCase().startsWith('pro');
+  const limits = [
+    { label: usageLabel(usage.primary, '5h'), limit: usage.primary },
+    { label: usageLabel(usage.secondary, 'week'), limit: usage.secondary },
+  ];
+  return limits.filter((entry): entry is { label: string; limit: CodexLimitSnapshot } =>
+    entry.limit !== null && (entry.label === 'week' || (!pro && entry.label === '5h')));
+}
+
 export function formatCodexUsage(usage: CodexUsageSnapshot | null): string | null {
   if (!usage) return null;
-  const parts: string[] = [];
-  const primary = formatLimit('5h', usage.primary);
-  const secondary = formatLimit('week', usage.secondary);
-  const sparkPrimary = formatLimit('Spark 5h', usage.sparkPrimary);
-  const sparkSecondary = formatLimit('Spark week', usage.sparkSecondary);
-  if (primary) parts.push(primary);
-  if (secondary) parts.push(secondary);
-  if (sparkPrimary) parts.push(sparkPrimary);
-  if (sparkSecondary) parts.push(sparkSecondary);
-  if (usage.creditsRemaining !== null) parts.push(`credits ${usage.creditsRemaining}`);
-  if (parts.length === 0) return null;
-  return `Usage: ${parts.join(' / ')}`;
+  const parts = visibleUsageLimits(usage).map(({ label, limit }) => formatLimit(label, limit));
+  if (usage.creditsRemaining !== null) parts.push('credits ' + usage.creditsRemaining);
+  return parts.length ? 'Usage: ' + parts.join(' / ') : null;
 }
 
 function parseUsageLine(line: string, lastActivityMs: number): CodexUsageSnapshot | null {
@@ -323,10 +279,6 @@ function parseUsageLine(line: string, lastActivityMs: number): CodexUsageSnapsho
       secondary: parseLimit(limits.secondary, lastActivityMs),
       creditsRemaining: parseCredits(limits.credits),
       planType: typeof limits.plan_type === 'string' ? limits.plan_type : null,
-      sparkLimitId: null,
-      sparkLabel: null,
-      sparkPrimary: null,
-      sparkSecondary: null,
       lastActivityMs,
     };
   } catch {
@@ -375,6 +327,20 @@ function formatLimit(label: string, limit: CodexLimitSnapshot | null): string | 
   if (!limit) return null;
   const remaining = remainingPercent(limit);
   return `${label} ${remaining}% left`;
+}
+
+/**
+ * Names a limit after the window Codex actually reports. Accounts without a 5h
+ * window now receive the weekly limit in the `primary` slot, so the slot alone can
+ * no longer name the row. `fallback` covers older rollout lines with no window.
+ */
+export function usageLabel(limit: CodexLimitSnapshot | null, fallback: string): string {
+  const minutes = limit?.windowMinutes ?? null;
+  if (minutes === null) return fallback;
+  if (minutes >= 7 * 24 * 60) return 'week';
+  if (minutes >= 24 * 60) return `${Math.floor(minutes / (24 * 60))}d`;
+  if (minutes >= 60) return `${Math.floor(minutes / 60)}h`;
+  return `${minutes}m`;
 }
 
 export function remainingPercent(limit: CodexLimitSnapshot): number {

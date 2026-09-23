@@ -1,6 +1,6 @@
 import { formatEffort, formatModel } from '../detector/codex-config';
 import type { RpcActivityMode, RpcButtonConfig } from '../config';
-import { remainingPercent } from '../detector/codex-usage';
+import { remainingPercent, visibleUsageLimits } from '../detector/codex-usage';
 import type { CodexLimitSnapshot } from '../detector/codex-usage';
 import type { DetectionResult, PresenceState } from '../detector/state';
 
@@ -132,13 +132,7 @@ function buildLargeImageText(result: DetectionResult): string {
 }
 
 function compactUsageParts(result: DetectionResult): string[] {
-  const primary = compactLimit('5h', result.usage?.primary ?? null);
-  const secondary = compactLimit('week', result.usage?.secondary ?? null);
-  const sparkPrimary = compactLimit('Spark 5h', result.usage?.sparkPrimary ?? null);
-  const sparkSecondary = compactLimit('Spark wk', result.usage?.sparkSecondary ?? null);
-  return [primary, secondary, sparkPrimary, sparkSecondary].filter(
-    (p): p is string => Boolean(p),
-  );
+  return visibleUsageLimits(result.usage).map(({ label, limit }) => compactLimit(label, limit)!);
 }
 
 function compactLimit(label: string, limit: CodexLimitSnapshot | null): string | null {

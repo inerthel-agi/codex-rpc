@@ -13,7 +13,7 @@ use std::{
 };
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Emitter, Manager, PhysicalPosition, WindowEvent,
+    Manager, PhysicalPosition, WindowEvent,
 };
 
 #[cfg(windows)]
@@ -30,6 +30,9 @@ struct DaemonState {
     stop: Arc<AtomicBool>,
     handle: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
+
+#[derive(Default)]
+struct TrayAnchor(Mutex<Option<PhysicalPosition<f64>>>);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RpcButton {
@@ -48,25 +51,11 @@ struct RpcSettings {
     #[serde(default = "default_show_usage")]
     show_weekly_usage: bool,
     #[serde(default = "default_show_usage")]
-    show_spark_primary_usage: bool,
-    #[serde(default = "default_show_usage")]
-    show_spark_weekly_usage: bool,
-    #[serde(default = "default_show_usage")]
     show_effort: bool,
     #[serde(default = "default_show_usage")]
     show_fast_mode: bool,
     #[serde(default = "default_show_usage")]
     show_credits: bool,
-    #[serde(default)]
-    show_cost: bool,
-    #[serde(default)]
-    show_cost_total: bool,
-    #[serde(default)]
-    show_project_tokens: bool,
-    #[serde(default)]
-    show_all_tokens: bool,
-    #[serde(default)]
-    always_on: bool,
 }
 
 impl Default for RpcSettings {
@@ -86,16 +75,9 @@ impl Default for RpcSettings {
             show_usage: None,
             show_primary_usage: true,
             show_weekly_usage: true,
-            show_spark_primary_usage: true,
-            show_spark_weekly_usage: true,
             show_effort: true,
             show_fast_mode: true,
             show_credits: true,
-            show_cost: false,
-            show_cost_total: false,
-            show_project_tokens: false,
-            show_all_tokens: false,
-            always_on: false,
         }
     }
 }
@@ -108,6 +90,8 @@ fn default_show_usage() -> bool {
 struct AppStatus {
     settings_path: String,
     status_line: String,
+    usage: Vec<UsageEntry>,
+    plan: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -157,6 +141,8 @@ fn load_status() -> Result<AppStatus, String> {
 
     Ok(AppStatus {
         settings_path: path.to_string_lossy().into_owned(),
+        usage: parse_status_usage(&status_line),
+        plan: status_line.split('|').nth(4).unwrap_or("").to_string(),
         status_line,
     })
 }
@@ -175,9 +161,32 @@ fn daemon_status(state: tauri::State<'_, DaemonState>) -> Result<DaemonStatus, S
     Ok(read_daemon_status(&state))
 }
 
-fn main() {
+fn acquire_instance_lock(path: &Path) -> std::io::Result<Option<fs::File>> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => Err(error),
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Keep the OS lock alive until the app exits; crashes release it too.
+    let Some(_instance) = acquire_instance_lock(&app_data_dir()?.join("desktop-instance.lock"))?
+    else {
+        return Ok(());
+    };
     tauri::Builder::default()
         .manage(DaemonState::default())
+        .manage(TrayAnchor::default())
         .invoke_handler(tauri::generate_handler![
             load_settings,
             save_settings,
@@ -186,6 +195,8 @@ fn main() {
             daemon_status,
             close_settings,
             tray_snapshot,
+            fit_tray,
+            hide_tray,
             toggle_startup,
             open_settings_from_tray,
             quit_app
@@ -201,6 +212,7 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("failed to run Codex RPC tray");
+    Ok(())
 }
 
 fn keep_window_in_tray(app: &mut tauri::App) {
@@ -252,6 +264,7 @@ fn hide_tray_popup_on_blur(app: &mut tauri::App) {
 }
 
 fn show_tray_popup(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>) {
+    *app.state::<TrayAnchor>().0.lock().unwrap() = Some(cursor);
     let Some(window) = app.get_webview_window("tray") else {
         return;
     };
@@ -260,32 +273,80 @@ fn show_tray_popup(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>) {
         width: 300,
         height: 380,
     });
-    let mut x = cursor.x - size.width as f64;
-    let mut y = cursor.y - size.height as f64 - 8.0;
-    if let Ok(Some(monitor)) = app.monitor_from_point(cursor.x, cursor.y) {
-        let bounds = monitor.position();
-        let area = monitor.size();
-        x = x.clamp(
-            bounds.x as f64,
-            (bounds.x + area.width as i32) as f64 - size.width as f64,
-        );
-        y = y.clamp(
-            bounds.y as f64,
-            (bounds.y + area.height as i32) as f64 - size.height as f64,
-        );
-    }
-
-    let _ = window.set_position(PhysicalPosition::new(x, y));
-    let _ = app.emit_to("tray", "tray:refresh", ());
+    position_tray(app, cursor, size);
     let _ = window.show();
     let _ = window.set_focus();
+}
+
+fn position_tray(
+    app: &tauri::AppHandle,
+    cursor: PhysicalPosition<f64>,
+    size: tauri::PhysicalSize<u32>,
+) {
+    let Some(window) = app.get_webview_window("tray") else {
+        return;
+    };
+    let mut position = PhysicalPosition::new(
+        cursor.x - size.width as f64,
+        cursor.y - size.height as f64 - 8.0,
+    );
+    if let Ok(Some(monitor)) = app.monitor_from_point(cursor.x, cursor.y) {
+        position = tray_position(cursor, size, *monitor.position(), *monitor.size());
+    }
+    let _ = window.set_position(position);
+}
+
+fn tray_position(
+    cursor: PhysicalPosition<f64>,
+    size: tauri::PhysicalSize<u32>,
+    origin: PhysicalPosition<i32>,
+    area: tauri::PhysicalSize<u32>,
+) -> PhysicalPosition<f64> {
+    PhysicalPosition::new(
+        (cursor.x - size.width as f64).clamp(
+            origin.x as f64,
+            (origin.x as f64 + area.width as f64 - size.width as f64).max(origin.x as f64),
+        ),
+        (cursor.y - size.height as f64 - 8.0).clamp(
+            origin.y as f64,
+            (origin.y as f64 + area.height as f64 - size.height as f64).max(origin.y as f64),
+        ),
+    )
+}
+
+#[tauri::command]
+fn fit_tray(app: tauri::AppHandle, height: f64) -> Result<(), String> {
+    let window = app
+        .get_webview_window("tray")
+        .ok_or("Tray window unavailable")?;
+    if !height.is_finite() {
+        return Err("Invalid height".into());
+    }
+    let size = tauri::LogicalSize::new(320.0, height.clamp(200.0, 600.0));
+    window.set_size(size).map_err(|err| err.to_string())?;
+    if let Some(cursor) = *app.state::<TrayAnchor>().0.lock().unwrap() {
+        position_tray(
+            &app,
+            cursor,
+            size.to_physical(window.scale_factor().unwrap_or(1.0)),
+        );
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn hide_tray(app: tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("tray") {
+        let _ = window.hide();
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct TraySnapshot {
     state: String,
     model: String,
-    usage: UsageLabels,
+    usage: Vec<UsageEntry>,
+    plan: String,
     discord: String,
     startup_label: &'static str,
     startup_enabled: bool,
@@ -312,6 +373,7 @@ fn tray_snapshot() -> Result<TraySnapshot, String> {
         },
         model,
         usage: parse_status_usage(&line),
+        plan: line.split('|').nth(4).unwrap_or("").to_string(),
         discord,
         startup_label: startup_menu_label(),
         startup_enabled: startup_enabled(),
@@ -340,21 +402,19 @@ fn quit_app(app: tauri::AppHandle, state: tauri::State<'_, DaemonState>) -> Resu
     Ok(())
 }
 
-#[derive(Default, Debug, Clone, Serialize)]
-struct UsageLabels {
-    primary: Option<String>,
-    secondary: Option<String>,
-    spark_primary: Option<String>,
-    spark_secondary: Option<String>,
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct UsageEntry {
+    label: String,
+    value: String,
+    percent: f64,
 }
 
-fn parse_status_usage(status_line: &str) -> UsageLabels {
-    // Status line format: "{state}|{model}|{usage}|{discord}" where {usage}
-    // is "Usage: 5h X% left / week Y% left / Spark 5h Z% left / Spark week W% left / credits N".
-    let mut labels = UsageLabels::default();
+fn parse_status_usage(status_line: &str) -> Vec<UsageEntry> {
+    // The daemon normalizes 5h/week windows before writing local status.
+    let mut entries = Vec::new();
     let usage_field = match status_line.split('|').nth(2) {
         Some(field) if !field.trim().is_empty() => field.trim().to_string(),
-        _ => return labels,
+        _ => return entries,
     };
     let body = usage_field
         .strip_prefix("Usage:")
@@ -362,27 +422,37 @@ fn parse_status_usage(status_line: &str) -> UsageLabels {
         .unwrap_or(usage_field.as_str());
     for raw in body.split('/') {
         let part = raw.trim();
-        let lower = part.to_ascii_lowercase();
-        let value = part
-            .trim_end_matches(|ch: char| ch.is_ascii_alphabetic() || ch.is_whitespace())
-            .rsplit(' ')
-            .next()
-            .unwrap_or("")
-            .to_string();
-        if value.is_empty() {
+        if part.is_empty() || part.to_ascii_lowercase().starts_with("credits") {
             continue;
         }
-        if lower.starts_with("spark 5h") {
-            labels.spark_primary = Some(value);
-        } else if lower.starts_with("spark week") || lower.starts_with("spark wk") {
-            labels.spark_secondary = Some(value);
-        } else if lower.starts_with("5h") {
-            labels.primary = Some(value);
-        } else if lower.starts_with("week") {
-            labels.secondary = Some(value);
+        let head = part.strip_suffix("left").unwrap_or(part).trim_end();
+        let Some((label, value)) = head.rsplit_once(' ') else {
+            continue;
+        };
+        if !matches!(label.trim(), "5h" | "week") {
+            continue;
         }
+        let Ok(percent) = value.trim_end_matches('%').parse::<f64>() else {
+            continue;
+        };
+        if !percent.is_finite() {
+            continue;
+        }
+        entries.push(UsageEntry {
+            label: capitalize(label.trim()),
+            value: value.to_string(),
+            percent: percent.clamp(0.0, 100.0),
+        });
     }
-    labels
+    entries
+}
+
+fn capitalize(label: &str) -> String {
+    let mut chars = label.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
 }
 
 #[cfg(windows)]
@@ -600,8 +670,6 @@ fn normalize_settings(mut settings: RpcSettings) -> RpcSettings {
     if settings.show_usage == Some(false) {
         settings.show_primary_usage = false;
         settings.show_weekly_usage = false;
-        settings.show_spark_primary_usage = false;
-        settings.show_spark_weekly_usage = false;
         settings.show_credits = false;
     }
     settings.show_usage = None;
@@ -673,4 +741,67 @@ fn app_data_dir() -> Result<PathBuf, String> {
     std::env::current_dir()
         .map(|path| path.join("codex-rich-presence"))
         .map_err(|err| err.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn instance_lock_rejects_duplicates_and_releases_on_drop() {
+        let path = std::env::temp_dir().join(format!(
+            "codex-rpc-instance-test-{}.lock",
+            std::process::id()
+        ));
+        let first = acquire_instance_lock(&path).unwrap().unwrap();
+        assert!(acquire_instance_lock(&path).unwrap().is_none());
+        drop(first);
+        let next = acquire_instance_lock(&path).unwrap().unwrap();
+        drop(next);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn tray_stays_anchored_after_resizing_on_scaled_and_negative_monitors() {
+        let origin = PhysicalPosition::new(-1920, 0);
+        let area = tauri::PhysicalSize::new(1920, 1080);
+        let cursor = PhysicalPosition::new(-50.0, 1040.0);
+        for height in [300, 400, 500] {
+            let size = tauri::LogicalSize::new(320.0, height as f64).to_physical(1.5);
+            let position = tray_position(cursor, size, origin, area);
+            assert_eq!(position.y + size.height as f64, cursor.y - 8.0);
+            assert!(position.x >= origin.x as f64);
+            assert!(position.x + size.width as f64 <= 0.0);
+        }
+        let position = tray_position(
+            PhysicalPosition::new(5.0, 5.0),
+            tauri::PhysicalSize::new(320, 300),
+            PhysicalPosition::new(0, 0),
+            area,
+        );
+        assert_eq!(position, PhysicalPosition::new(0.0, 0.0));
+    }
+
+    #[test]
+    fn status_usage_yields_one_entry_per_reported_limit() {
+        let line = "Codex: Desktop|GPT-5.6-Sol - Max|Usage: week 89% left / Spark week 100% left / credits 0|Discord: Connected (user)|";
+        let entries = parse_status_usage(line);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].label, "Week");
+        assert_eq!(entries[0].value, "89%");
+        assert_eq!(entries[0].percent, 89.0);
+    }
+
+    #[test]
+    fn status_usage_keeps_short_windows_when_the_plan_has_them() {
+        let entries = parse_status_usage("Codex: CLI|GPT-5|Usage: 5h 42% left / week 7% left|");
+        let labels: Vec<&str> = entries.iter().map(|entry| entry.label.as_str()).collect();
+        assert_eq!(labels, ["5h", "Week"]);
+    }
+
+    #[test]
+    fn status_usage_is_empty_without_a_usage_field() {
+        assert!(parse_status_usage("Codex: Off||").is_empty());
+        assert!(parse_status_usage("").is_empty());
+    }
 }

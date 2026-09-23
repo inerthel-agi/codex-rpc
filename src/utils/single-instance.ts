@@ -129,6 +129,14 @@ function isOwnerAlive(record: LockRecord): boolean {
   if (!pidExists(record.pid)) return false;
   if (!record.exe || record.startTimeMs === 0) return false;
 
+  // Reentrant checks already know this process's identity; avoid a slow CIM query.
+  if (record.pid === process.pid) {
+    return (
+      normalizeExePath(record.exe) === normalizeExePath(process.execPath) &&
+      Math.abs(startTimeMs() - record.startTimeMs) <= PROCESS_START_TOLERANCE_MS
+    );
+  }
+
   const identity = getProcessIdentity(record.pid);
   if (!identity) return false;
 

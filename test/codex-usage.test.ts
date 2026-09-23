@@ -44,7 +44,7 @@ describe('readLatestCodexUsage', () => {
             primary: { used_percent: 5, window_minutes: 300, resets_at: futureReset },
             secondary: { used_percent: 19, window_minutes: 10080, resets_at: futureReset },
             credits: { remaining: 0 },
-            plan_type: 'pro',
+            plan_type: 'plus',
           },
         },
       },
@@ -56,6 +56,31 @@ describe('readLatestCodexUsage', () => {
     expect(usage?.secondary?.usedPercent).toBe(19);
     expect(usage?.creditsRemaining).toBe(0);
     expect(formatCodexUsage(usage)).toBe('Usage: 5h 95% left / week 81% left / credits 0');
+  });
+
+  it('labels the primary slot after its window when the plan has no 5h limit', () => {
+    // Accounts without a 5h window receive the weekly limit in `primary` and no
+    // `secondary` at all, so the label must follow window_minutes, not the slot.
+    writeRollout('2026/07/25/rollout-weekly.jsonl', [
+      {
+        type: 'event_msg',
+        payload: {
+          type: 'token_count',
+          rate_limits: {
+            limit_id: 'codex',
+            primary: { used_percent: 11, window_minutes: 10080, resets_at: futureReset },
+            secondary: null,
+            credits: { balance: '0' },
+            plan_type: 'prolite',
+          },
+        },
+      },
+    ]);
+
+    const usage = readLatestCodexUsage(root);
+    expect(usage?.primary?.windowMinutes).toBe(10080);
+    expect(usage?.secondary).toBeNull();
+    expect(formatCodexUsage(usage)).toBe('Usage: week 89% left / credits 0');
   });
 
   it('returns null when no token_count exists', () => {
@@ -127,7 +152,7 @@ describe('readLatestCodexUsage', () => {
     );
   });
 
-  it('keeps codex as the primary group while surfacing spark separately', () => {
+  it('keeps codex as the primary group without displaying Spark', () => {
     writeRollout(
       'rollout-global.jsonl',
       [
@@ -160,7 +185,7 @@ describe('readLatestCodexUsage', () => {
     ]);
 
     expect(formatCodexUsage(readLatestCodexUsage(root))).toBe(
-      'Usage: 5h 78% left / week 76% left / Spark 5h 100% left / Spark week 100% left',
+      'Usage: 5h 78% left / week 76% left',
     );
   });
 
@@ -189,10 +214,10 @@ describe('readLatestCodexUsage', () => {
     );
 
     expect(usage?.limitId).toBe('codex');
-    expect(formatCodexUsage(usage)).toBe('Usage: 5h 91% left / week 55% left / credits 0');
+    expect(formatCodexUsage(usage)).toBe('Usage: week 55% left / credits 0');
   });
 
-  it('parses Spark rate limits alongside the codex group', () => {
+  it('ignores Spark rate limits alongside the codex group', () => {
     const usage = parseAccountUsageResponse(
       JSON.stringify({
         id: 1,
@@ -218,16 +243,40 @@ describe('readLatestCodexUsage', () => {
     );
 
     expect(usage?.limitId).toBe('codex');
-    expect(usage?.sparkLimitId).toBe('codex_bengalfox');
-    expect(usage?.sparkLabel).toBe('GPT-5.3-Codex-Spark');
-    expect(usage?.sparkPrimary?.usedPercent).toBe(0);
-    expect(usage?.sparkSecondary?.usedPercent).toBe(0);
     expect(formatCodexUsage(usage)).toBe(
-      'Usage: 5h 100% left / week 81% left / Spark 5h 100% left / Spark week 100% left / credits 0',
+      'Usage: week 81% left / credits 0',
     );
   });
 
-  it('merges Spark rollout entries with the codex limits', () => {
+  it('labels weekly-only account limits as week and hides Spark', () => {
+    const usage = parseAccountUsageResponse(
+      JSON.stringify({
+        id: 1,
+        result: {
+          rateLimitsByLimitId: {
+            codex: {
+              limitId: 'codex',
+              primary: { usedPercent: 11, windowDurationMins: 10080, resetsAt: futureReset },
+              credits: { balance: '0' },
+              planType: 'prolite',
+            },
+            codex_bengalfox: {
+              limitId: 'codex_bengalfox',
+              limitName: 'GPT-5.3-Codex-Spark',
+              primary: { usedPercent: 0, windowDurationMins: 10080, resetsAt: futureReset },
+            },
+          },
+        },
+      }),
+      Date.now(),
+    );
+
+    expect(formatCodexUsage(usage)).toBe(
+      'Usage: week 89% left / credits 0',
+    );
+  });
+
+  it('ignores Spark rollout entries and retains the codex limits', () => {
     writeRollout(
       'rollout-codex.jsonl',
       [
@@ -261,8 +310,5 @@ describe('readLatestCodexUsage', () => {
 
     const usage = readLatestCodexUsage(root);
     expect(usage?.limitId).toBe('codex');
-    expect(usage?.sparkLimitId).toBe('codex_bengalfox');
-    expect(usage?.sparkPrimary?.usedPercent).toBe(0);
-    expect(usage?.sparkSecondary?.usedPercent).toBe(0);
   });
 });

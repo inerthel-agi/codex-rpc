@@ -2,6 +2,20 @@
 
 All notable changes to Codex RPC are documented here.
 
+## [0.4.0] - 2026-09-23
+
+### Changed
+
+- Redesigned the settings window and tray popup with visible usage bars. Pro subscriptions show the weekly limit; Plus shows 5-hour and weekly limits when Codex reports them.
+- Removed Spark limits, cost and token estimates, and Always on mode from the Tauri app.
+
+### Fixed
+
+- Classify Codex Desktop helpers as Desktop and ignore Codex RPC's own usage probes, preventing false CLI + Desktop presence.
+- Keep one Tauri instance across launches and release the instance lock after a crash.
+- Validate the daemon lock before stopping a process from `stop.bat`.
+- Avoid a slow process lookup when the Node daemon checks its own instance lock.
+
 ## [0.3.18] - 2026-05-10
 
 ### Changed

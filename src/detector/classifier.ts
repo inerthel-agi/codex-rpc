@@ -44,6 +44,11 @@ export function classify(ctx: ClassificationContext): Classification {
   const exe = p.executablePath ?? '';
   const parent = p.parentName?.toLowerCase() ?? null;
 
+  if (p.owner === 'ignored') return { kind: 'unknown', rule: 0 };
+  if (p.owner === 'app' || /\/(?:openai|programs|program files)\/codex\//i.test(exe.replace(/\\/g, '/'))) {
+    return { kind: 'app', rule: 4 };
+  }
+
   if (exe && CANONICAL_CLI_REGEX.test(exe)) {
     return { kind: 'cli', rule: 1 };
   }

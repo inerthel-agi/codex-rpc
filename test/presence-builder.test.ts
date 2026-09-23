@@ -129,11 +129,7 @@ describe('buildPresence', () => {
           primary: { usedPercent: 5, windowMinutes: 300, resetsAt: null },
           secondary: { usedPercent: 19, windowMinutes: 10080, resetsAt: null },
           creditsRemaining: 0,
-          planType: 'pro',
-          sparkLimitId: null,
-          sparkLabel: null,
-          sparkPrimary: null,
-          sparkSecondary: null,
+          planType: 'plus',
           lastActivityMs: Date.now(),
         },
       ),
@@ -142,7 +138,7 @@ describe('buildPresence', () => {
     expect(p?.largeImageText).toBe('OpenAI Codex · 5h 95% · week 81%');
   });
 
-  it('includes Spark limits in the image tooltip when present', () => {
+  it('shows only the weekly limit for Pro', () => {
     const p = buildPresence(
       mk(
         'cli',
@@ -155,15 +151,11 @@ describe('buildPresence', () => {
           secondary: { usedPercent: 19, windowMinutes: 10080, resetsAt: null },
           creditsRemaining: 0,
           planType: 'pro',
-          sparkLimitId: 'codex_bengalfox',
-          sparkLabel: 'GPT-5.3-Codex-Spark',
-          sparkPrimary: { usedPercent: 0, windowMinutes: 300, resetsAt: null },
-          sparkSecondary: { usedPercent: 0, windowMinutes: 10080, resetsAt: null },
           lastActivityMs: Date.now(),
         },
       ),
     );
-    expect(p?.largeImageText).toContain('Spark 5h');
+    expect(p?.largeImageText).toBe('OpenAI Codex · week 81%');
   });
 
   it('adds optional RPC buttons only in TV mode', () => {

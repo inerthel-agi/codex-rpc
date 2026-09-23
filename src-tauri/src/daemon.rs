@@ -51,11 +51,6 @@ const RPC_REFRESH_INTERVAL_MS: u64 = 15_000;
 const IDLE_GRACE_MS: u64 = 10_000;
 const LOCAL_USAGE_REFRESH_MS: u64 = 60_000;
 const ACCOUNT_USAGE_CACHE_MS: u64 = 30_000;
-// OpenAI bills cached input at a flat 0.1x of the model's input rate and never
-// charges for cache writes (unlike Claude's 1.25x/2x write tiers).
-const CACHED_INPUT_MULT: f64 = 0.1;
-// Re-walking every rollout to total lifetime spend is the expensive path; gate it.
-const COST_REFRESH_MS: u64 = 30_000;
 const ACTIVITY_PLAYING: u8 = 0;
 const ACTIVITY_LISTENING: u8 = 2;
 const ACTIVITY_WATCHING: u8 = 3;
@@ -87,25 +82,11 @@ struct RpcSettings {
     #[serde(default = "default_show_usage")]
     show_weekly_usage: bool,
     #[serde(default = "default_show_usage")]
-    show_spark_primary_usage: bool,
-    #[serde(default = "default_show_usage")]
-    show_spark_weekly_usage: bool,
-    #[serde(default = "default_show_usage")]
     show_effort: bool,
     #[serde(default = "default_show_usage")]
     show_fast_mode: bool,
     #[serde(default = "default_show_usage")]
     show_credits: bool,
-    #[serde(default)]
-    show_cost: bool,
-    #[serde(default)]
-    show_cost_total: bool,
-    #[serde(default)]
-    show_project_tokens: bool,
-    #[serde(default)]
-    show_all_tokens: bool,
-    #[serde(default)]
-    always_on: bool,
 }
 
 impl Default for RpcSettings {
@@ -125,16 +106,9 @@ impl Default for RpcSettings {
             show_usage: None,
             show_primary_usage: true,
             show_weekly_usage: true,
-            show_spark_primary_usage: true,
-            show_spark_weekly_usage: true,
             show_effort: true,
             show_fast_mode: true,
             show_credits: true,
-            show_cost: false,
-            show_cost_total: false,
-            show_project_tokens: false,
-            show_all_tokens: false,
-            always_on: false,
         }
     }
 }
@@ -149,7 +123,6 @@ enum PresenceState {
     Cli,
     App,
     Both,
-    Monitor,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -166,7 +139,6 @@ struct DetectionResult {
     codex: Option<CodexConfig>,
     session: Option<CodexSession>,
     usage: Option<CodexUsage>,
-    costs: Option<CodexCosts>,
 }
 
 impl Default for DetectionResult {
@@ -177,7 +149,6 @@ impl Default for DetectionResult {
             codex: None,
             session: None,
             usage: None,
-            costs: None,
         }
     }
 }
@@ -198,6 +169,10 @@ struct CodexSession {
 #[derive(Debug, Clone)]
 struct LimitSnapshot {
     used_percent: f64,
+    /// Length of the rate-limit window as reported by Codex. Plans no longer all
+    /// expose a 5h window, so labels are derived from this instead of the slot
+    /// (`primary`/`secondary`) the limit arrives in.
+    window_minutes: Option<u64>,
     resets_at_ms: Option<u64>,
     observed_at_ms: u64,
 }
@@ -205,51 +180,15 @@ struct LimitSnapshot {
 #[derive(Debug, Clone)]
 struct CodexUsage {
     limit_id: Option<String>,
+    plan_type: Option<String>,
     primary: Option<LimitSnapshot>,
     secondary: Option<LimitSnapshot>,
     credits_remaining: Option<f64>,
-    spark_limit_id: Option<String>,
-    spark_label: Option<String>,
-    spark_primary: Option<LimitSnapshot>,
-    spark_secondary: Option<LimitSnapshot>,
-}
-
-// Per-model-family token + cost rollup. Serialized camelCase so the figures are
-// JSON-ready for a future settings panel. OpenAI mapping vs the Claude original:
-// `cache_read_tokens` = cached_input_tokens (a SUBSET of input_tokens, billed at
-// 0.1x), and `cache_creation_tokens` is always 0 (OpenAI never bills cache writes).
-// `input_cost` already folds the cached discount in, so input_cost + output_cost
-// == cost_usd. Reasoning tokens are billed at the output rate.
-#[derive(Debug, Clone, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ModelCost {
-    label: String,
-    input_tokens: u64,
-    output_tokens: u64,
-    cache_read_tokens: u64,
-    cache_creation_tokens: u64,
-    input_cost: f64,
-    output_cost: f64,
-    cost_usd: f64,
-}
-
-// `current` = the current project's per-model spend (every session whose cwd
-// matches the live session's cwd); `all` = every rollout under ~/.codex/sessions
-// summed per family (there is no aggregate usage file like ~/.claude.json, so the
-// lifetime total is built from the sessions). The four flags mirror the RpcSettings
-// toggles and gate which lines the status/presence builders emit.
-#[derive(Debug, Clone, Default)]
-struct CodexCosts {
-    current: Vec<ModelCost>,
-    all: Vec<ModelCost>,
-    show_cost: bool,
-    show_cost_total: bool,
-    show_project_tokens: bool,
-    show_all_tokens: bool,
 }
 
 #[derive(Debug, Clone)]
 struct ProcessSnapshot {
+    owner: Option<PresenceState>,
     parent_name: Option<String>,
     executable_path: Option<String>,
     creation_date_ms: Option<u64>,
@@ -268,11 +207,6 @@ struct StateMachine {
     last_non_idle_at_ms: u64,
     last_emitted: DetectionResult,
     anchor_start_ms: Option<u64>,
-    // Per-rollout cost cache keyed by path -> (mtime, session cwd, per-model costs);
-    // only the live session is re-read once an old rollout's mtime stops changing.
-    cost_cache: HashMap<PathBuf, (u64, Option<String>, Vec<ModelCost>)>,
-    cached_costs: Option<CodexCosts>,
-    cached_costs_at_ms: u64,
 }
 
 pub fn run(stop: Arc<AtomicBool>, settings_path: Option<PathBuf>, status_path: Option<PathBuf>) {
@@ -320,12 +254,11 @@ pub fn run(stop: Arc<AtomicBool>, settings_path: Option<PathBuf>, status_path: O
             last_scan_at = now;
             last_metadata_refresh_at = now;
         } else if now.saturating_sub(last_metadata_refresh_at) >= CODEX_METADATA_REFRESH_MS {
-            refresh_codex_metadata(&mut result, settings.always_on);
+            refresh_codex_metadata(&mut result);
             last_metadata_refresh_at = now;
         }
 
         let mut display_result = result.clone();
-        apply_always_on(&mut display_result, &settings);
         // Status line keeps unfiltered usage: the show_* flags only gate what is
         // published to Discord, not what the tray popup displays locally.
         let status_line = format_status_line(
@@ -384,7 +317,7 @@ fn detect(machine: &mut StateMachine, idle_grace_ms: u64) -> DetectionResult {
                 oldest = min_option(oldest, process.creation_date_ms);
             }
             PresenceState::Idle => counts.unknown += 1,
-            PresenceState::Both | PresenceState::Monitor => {}
+            PresenceState::Both => {}
         }
     }
 
@@ -410,13 +343,12 @@ fn detect(machine: &mut StateMachine, idle_grace_ms: u64) -> DetectionResult {
         codex: read_codex_config(session.as_ref().map(|session| session.cwd.as_str())),
         session,
         usage: read_codex_usage(),
-        costs: read_codex_costs(machine),
     };
     machine.step(result, idle_grace_ms)
 }
 
-fn refresh_codex_metadata(result: &mut DetectionResult, include_idle: bool) {
-    if result.state == PresenceState::Idle && !include_idle {
+fn refresh_codex_metadata(result: &mut DetectionResult) {
+    if result.state == PresenceState::Idle {
         return;
     }
     let session = if result.state == PresenceState::Idle {
@@ -462,6 +394,9 @@ impl StateMachine {
 }
 
 fn classify_process(process: &ProcessSnapshot) -> PresenceState {
+    if let Some(owner) = process.owner {
+        return owner;
+    }
     let exe = process
         .executable_path
         .as_deref()
@@ -474,6 +409,14 @@ fn classify_process(process: &ProcessSnapshot) -> PresenceState {
         .unwrap_or_default()
         .to_ascii_lowercase();
     let parent_name = command_basename(&parent);
+
+    if exe_unix.contains("/openai/codex/")
+        || exe_unix.contains("/programs/codex/")
+        || exe_unix.contains("/program files/codex/")
+        || exe_unix.contains("/codex.app/contents/")
+    {
+        return PresenceState::App;
+    }
 
     if exe.contains("\\node_modules\\@openai\\codex\\")
         || exe_unix.contains("/node_modules/@openai/codex/")
@@ -549,16 +492,53 @@ fn scan_codex_processes_windows() -> Vec<ProcessSnapshot> {
         .iter()
         .map(|entry| (entry.process_id, entry.name.clone()))
         .collect::<HashMap<_, _>>();
+    let parents = entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.process_id,
+                (entry.parent_process_id, entry.name.clone()),
+            )
+        })
+        .collect();
 
     entries
         .into_iter()
         .filter(|entry| entry.name.eq_ignore_ascii_case("codex.exe"))
         .map(|entry| ProcessSnapshot {
+            owner: process_owner(entry.parent_process_id, &parents),
             parent_name: names.get(&entry.parent_process_id).cloned(),
             executable_path: query_process_path(entry.process_id),
             creation_date_ms: query_process_creation_ms(entry.process_id),
         })
         .collect()
+}
+
+fn process_owner(mut pid: u32, parents: &HashMap<u32, (u32, String)>) -> Option<PresenceState> {
+    // Bound traversal even if a snapshot contains a recycled PID or a cycle.
+    for _ in 0..parents.len() {
+        if pid == std::process::id() {
+            return Some(PresenceState::Idle);
+        }
+        let (parent_pid, name) = parents.get(&pid)?;
+        let name = name.to_ascii_lowercase();
+        if matches!(
+            command_basename(&name).as_str(),
+            "codex-rich-presence.exe"
+                | "codex_rich_presence_tray.exe"
+                | "codex-rich-presence"
+                | "codex_rich_presence_tray"
+        ) {
+            return Some(PresenceState::Idle);
+        }
+        if matches!(command_basename(&name).as_str(), "chatgpt.exe" | "chatgpt")
+            || name.contains("/codex.app/contents/")
+        {
+            return Some(PresenceState::App);
+        }
+        pid = *parent_pid;
+    }
+    None
 }
 
 #[cfg(windows)]
@@ -662,11 +642,21 @@ fn scan_codex_processes_macos() -> Vec<ProcessSnapshot> {
         .iter()
         .map(|entry| (entry.process_id, entry.command.clone()))
         .collect::<HashMap<_, _>>();
+    let parents = entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.process_id,
+                (entry.parent_process_id, entry.command.clone()),
+            )
+        })
+        .collect();
 
     entries
         .into_iter()
         .filter(|entry| is_macos_codex_candidate(&entry.command))
         .map(|entry| ProcessSnapshot {
+            owner: process_owner(entry.parent_process_id, &parents),
             parent_name: commands.get(&entry.parent_process_id).cloned(),
             executable_path: Some(entry.command),
             creation_date_ms: None,
@@ -785,11 +775,9 @@ fn build_details(result: &DetectionResult, mode: &str) -> String {
         (PresenceState::Cli, "watching") => "Watching Codex CLI",
         (PresenceState::App, "watching") => "Watching Codex",
         (PresenceState::Both, "watching") => "Watching Codex (CLI + Desktop)",
-        (PresenceState::Monitor, "watching") => "Watching Codex usage",
         (PresenceState::Cli, _) => "Coding with Codex CLI",
         (PresenceState::App, _) => "Using Codex",
         (PresenceState::Both, _) => "Coding with Codex (CLI + Desktop)",
-        (PresenceState::Monitor, _) => "Monitoring Codex usage",
         (PresenceState::Idle, _) => "",
     };
     if let Some(repo) = result
@@ -842,7 +830,6 @@ fn build_state_line(result: &DetectionResult, settings: &RpcSettings) -> String 
             PresenceState::Cli => "Terminal session active".into(),
             PresenceState::App => "Desktop session".into(),
             PresenceState::Both => "CLI + Desktop".into(),
-            PresenceState::Monitor => "Tracking usage".into(),
             PresenceState::Idle => String::new(),
         }
     } else {
@@ -857,8 +844,7 @@ fn build_state_line(result: &DetectionResult, settings: &RpcSettings) -> String 
         } else {
             format!("{base} - {suffix}")
         };
-        // Discord's state field allows 128 chars; the old 48 cap silently dropped
-        // the trailing cost/token parts whenever usage already filled the line.
+        // Discord's state field allows 128 characters.
         if candidate.len() <= 128 {
             return candidate;
         }
@@ -879,23 +865,19 @@ fn compact_usage_parts(result: &DetectionResult) -> Vec<String> {
     let mut parts = Vec::new();
     if let Some(usage) = &result.usage {
         if let Some(primary) = &usage.primary {
-            parts.push(format!("5h {}%", remaining_percent(primary)));
+            parts.push(format!(
+                "{} {}%",
+                usage_label(primary, "5h"),
+                remaining_percent(primary)
+            ));
         }
         if let Some(secondary) = &usage.secondary {
-            parts.push(format!("week {}%", remaining_percent(secondary)));
+            parts.push(format!(
+                "{} {}%",
+                usage_label(secondary, "week"),
+                remaining_percent(secondary)
+            ));
         }
-        if let Some(primary) = &usage.spark_primary {
-            parts.push(format!("Spark 5h {}%", remaining_percent(primary)));
-        }
-        if let Some(secondary) = &usage.spark_secondary {
-            parts.push(format!("Spark wk {}%", remaining_percent(secondary)));
-        }
-    }
-    if let Some(cost) = compact_cost_part(result) {
-        parts.push(cost);
-    }
-    if let Some(tokens) = compact_tokens_part(result) {
-        parts.push(tokens);
     }
     parts
 }
@@ -909,7 +891,6 @@ fn format_status_line(
         PresenceState::Both => "Codex: CLI/Desktop",
         PresenceState::Cli => "Codex: CLI",
         PresenceState::App => "Codex: Desktop",
-        PresenceState::Monitor => "Codex: Monitoring",
         PresenceState::Idle => "Codex: Off",
     };
     let model = result
@@ -943,26 +924,30 @@ fn format_status_line(
         Some(user) => format!("Discord: Connected ({user})"),
         None => "Discord: RPC Disabled".into(),
     };
-    // Cost detail is appended as a 5th field; readers that split on the first four
-    // fields (e.g. main.rs::parse_status_usage) are unaffected.
-    let cost = build_cost_status(result.costs.as_ref());
-    format!("{state}|{model_line}|{usage_line}|{discord}|{cost}")
+    let plan = result
+        .usage
+        .as_ref()
+        .and_then(|usage| usage.plan_type.as_deref())
+        .unwrap_or("");
+    format!("{state}|{model_line}|{usage_line}|{discord}|{plan}")
 }
 
 fn format_usage(usage: Option<&CodexUsage>) -> Option<String> {
     let usage = usage?;
     let mut parts = Vec::new();
     if let Some(primary) = &usage.primary {
-        parts.push(format!("5h {}% left", remaining_percent(primary)));
+        parts.push(format!(
+            "{} {}% left",
+            usage_label(primary, "5h"),
+            remaining_percent(primary)
+        ));
     }
     if let Some(secondary) = &usage.secondary {
-        parts.push(format!("week {}% left", remaining_percent(secondary)));
-    }
-    if let Some(primary) = &usage.spark_primary {
-        parts.push(format!("Spark 5h {}% left", remaining_percent(primary)));
-    }
-    if let Some(secondary) = &usage.spark_secondary {
-        parts.push(format!("Spark week {}% left", remaining_percent(secondary)));
+        parts.push(format!(
+            "{} {}% left",
+            usage_label(secondary, "week"),
+            remaining_percent(secondary)
+        ));
     }
     if let Some(credits) = usage.credits_remaining {
         parts.push(format!("credits {}", credits.round()));
@@ -1000,13 +985,6 @@ fn read_rpc_settings(path: &Path) -> RpcSettings {
     settings
 }
 
-fn apply_always_on(result: &mut DetectionResult, settings: &RpcSettings) {
-    if settings.always_on && result.state == PresenceState::Idle {
-        result.state = PresenceState::Monitor;
-        result.started_at_ms = None;
-    }
-}
-
 fn filter_usage(result: &mut DetectionResult, settings: &RpcSettings) {
     if let Some(usage) = result.usage.as_mut() {
         if !settings.show_primary_usage {
@@ -1014,12 +992,6 @@ fn filter_usage(result: &mut DetectionResult, settings: &RpcSettings) {
         }
         if !settings.show_weekly_usage {
             usage.secondary = None;
-        }
-        if !settings.show_spark_primary_usage {
-            usage.spark_primary = None;
-        }
-        if !settings.show_spark_weekly_usage {
-            usage.spark_secondary = None;
         }
         if !settings.show_credits {
             usage.credits_remaining = None;
@@ -1030,36 +1002,36 @@ fn filter_usage(result: &mut DetectionResult, settings: &RpcSettings) {
             codex.effort = None;
         }
     }
-    let any_cost = settings.show_cost
-        || settings.show_cost_total
-        || settings.show_project_tokens
-        || settings.show_all_tokens;
-    if !any_cost {
-        result.costs = None;
-    } else if let Some(costs) = result.costs.as_mut() {
-        costs.show_cost = settings.show_cost;
-        costs.show_cost_total = settings.show_cost_total;
-        costs.show_project_tokens = settings.show_project_tokens;
-        costs.show_all_tokens = settings.show_all_tokens;
-    }
 }
 
 fn read_codex_config(project_cwd: Option<&str>) -> Option<CodexConfig> {
-    let mut cfg = if let Ok(raw) = fs::read_to_string(home_dir().join(".codex").join("config.toml"))
-    {
+    let config_path = home_dir().join(".codex").join("config.toml");
+    let mut cfg = if let Ok(raw) = fs::read_to_string(&config_path) {
         parse_codex_config(&raw, project_cwd)
     } else {
         CodexConfig::default()
     };
-    if let Some(runtime_cfg) = read_turn_context_config() {
-        if runtime_cfg.model.is_some() {
-            cfg.model = runtime_cfg.model;
-        }
-        if runtime_cfg.effort.is_some() {
-            cfg.effort = runtime_cfg.effort;
-        }
-        if runtime_cfg.service_tier.is_some() {
-            cfg.service_tier = runtime_cfg.service_tier;
+    let config_mtime_ms = fs::metadata(&config_path)
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0);
+    // A `/model` change rewrites config.toml immediately, but the last
+    // turn_context in the rollout log still carries the previous model until
+    // the next turn starts. When the config file is newer than the last
+    // recorded turn, trust the file over the stale runtime snapshot.
+    if let Some((runtime_cfg, turn_ms)) = read_turn_context_config() {
+        if turn_ms >= config_mtime_ms {
+            if runtime_cfg.model.is_some() {
+                cfg.model = runtime_cfg.model;
+            }
+            if runtime_cfg.effort.is_some() {
+                cfg.effort = runtime_cfg.effort;
+            }
+            if runtime_cfg.service_tier.is_some() {
+                cfg.service_tier = runtime_cfg.service_tier;
+            }
         }
     }
     if cfg.model.is_none() && cfg.effort.is_none() && cfg.service_tier.is_none() {
@@ -1113,21 +1085,23 @@ fn extract_project_section_path(line: &str) -> Option<String> {
     None
 }
 
-fn read_turn_context_config() -> Option<CodexConfig> {
+/// Returns the latest turn_context config plus the moment that turn started
+/// (line timestamp when present, otherwise the rollout file's mtime).
+fn read_turn_context_config() -> Option<(CodexConfig, u64)> {
     for rollout in find_recent_rollout_files(&sessions_dir(), 24 * 60 * 60 * 1000) {
         let Some(lines) = read_tail_lines(&rollout.0, 1024 * 1024) else {
             continue;
         };
         for line in lines.iter().rev() {
-            if let Some(cfg) = parse_turn_context_line(line) {
-                return Some(cfg);
+            if let Some((cfg, ts)) = parse_turn_context_line(line) {
+                return Some((cfg, ts.unwrap_or(rollout.1)));
             }
         }
     }
     None
 }
 
-fn parse_turn_context_line(line: &str) -> Option<CodexConfig> {
+fn parse_turn_context_line(line: &str) -> Option<(CodexConfig, Option<u64>)> {
     let obj: Value = serde_json::from_str(line).ok()?;
     if obj.get("type").and_then(Value::as_str) != Some("turn_context") {
         return None;
@@ -1151,8 +1125,39 @@ fn parse_turn_context_line(line: &str) -> Option<CodexConfig> {
     if cfg.model.is_none() && cfg.effort.is_none() && cfg.service_tier.is_none() {
         None
     } else {
-        Some(cfg)
+        let ts = obj
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(parse_utc_timestamp_ms);
+        Some((cfg, ts))
     }
+}
+
+/// Parses a rollout line timestamp ("2026-07-09T18:00:59.694Z") to unix ms.
+/// Rollout timestamps are always UTC; anything else returns None.
+fn parse_utc_timestamp_ms(ts: &str) -> Option<u64> {
+    let ts = ts.strip_suffix('Z')?;
+    let (date, time) = ts.split_once('T')?;
+    let mut d = date.splitn(3, '-');
+    let year: i64 = d.next()?.parse().ok()?;
+    let month: i64 = d.next()?.parse().ok()?;
+    let day: i64 = d.next()?.parse().ok()?;
+    let (hms, frac) = time.split_once('.').unwrap_or((time, ""));
+    let mut t = hms.splitn(3, ':');
+    let hour: i64 = t.next()?.parse().ok()?;
+    let min: i64 = t.next()?.parse().ok()?;
+    let sec: i64 = t.next()?.parse().ok()?;
+    let millis: i64 = format!("{frac}000")[..3].parse().ok()?;
+    // days-from-civil (Howard Hinnant): days since 1970-01-01 without chrono.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    let ms = (days * 86400 + hour * 3600 + min * 60 + sec) * 1000 + millis;
+    u64::try_from(ms).ok()
 }
 
 fn read_codex_session() -> Option<CodexSession> {
@@ -1178,50 +1183,19 @@ fn read_codex_usage() -> Option<CodexUsage> {
     }
     refresh_local_codex_usage();
 
-    let mut codex: Option<CodexUsage> = None;
-    let mut spark: Option<CodexUsage> = None;
-    let mut fallback: Option<CodexUsage> = None;
     for rollout in find_recent_rollout_files(&sessions_dir(), 24 * 60 * 60 * 1000) {
         let Some(lines) = read_tail_lines(&rollout.0, 256 * 1024) else {
             continue;
         };
         for line in lines.iter().rev() {
-            let Some(usage) = parse_usage_line(line, rollout.1) else {
-                continue;
-            };
-            match usage.limit_id.as_deref() {
-                Some("codex") => {
-                    if codex.is_none() {
-                        codex = Some(usage);
-                    }
-                }
-                Some(id) if id.starts_with("codex_") || id.contains("spark") => {
-                    if spark.is_none() {
-                        spark = Some(usage);
-                    }
-                }
-                _ => {
-                    if fallback.is_none() {
-                        fallback = Some(usage);
-                    }
+            if let Some(usage) = parse_usage_line(line, rollout.1) {
+                if usage.limit_id.as_deref().is_none_or(|id| id == "codex") {
+                    return Some(usage);
                 }
             }
-            if codex.is_some() && spark.is_some() {
-                break;
-            }
-        }
-        if codex.is_some() && spark.is_some() {
-            break;
         }
     }
-    let mut result = codex.or(fallback)?;
-    if let Some(spark) = spark {
-        result.spark_limit_id = spark.limit_id;
-        result.spark_label = None;
-        result.spark_primary = spark.primary;
-        result.spark_secondary = spark.secondary;
-    }
-    Some(result)
+    None
 }
 
 fn read_codex_account_usage() -> Option<CodexUsage> {
@@ -1247,6 +1221,8 @@ fn read_codex_account_usage() -> Option<CodexUsage> {
 fn read_codex_account_usage_uncached() -> Option<CodexUsage> {
     const ACCOUNT_USAGE_TIMEOUT_MS: u64 = 5000;
     const INIT_REQUEST: &[u8] = b"{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"codex-rpc\",\"version\":\"0\"}}}\n";
+    // Codex 0.144+ rejects requests sent before the `initialized` notification.
+    const INITIALIZED_NOTIFICATION: &[u8] = b"{\"jsonrpc\":\"2.0\",\"method\":\"initialized\"}\n";
     const READ_REQUEST: &[u8] =
         b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"account/rateLimits/read\",\"params\":null}\n";
 
@@ -1266,6 +1242,7 @@ fn read_codex_account_usage_uncached() -> Option<CodexUsage> {
 
         if let Some(stdin) = child.stdin.as_mut() {
             let _ = stdin.write_all(INIT_REQUEST);
+            let _ = stdin.write_all(INITIALIZED_NOTIFICATION);
             let _ = stdin.write_all(READ_REQUEST);
             let _ = stdin.flush();
         }
@@ -1284,9 +1261,21 @@ fn read_codex_account_usage_uncached() -> Option<CodexUsage> {
         let mut chunk = [0u8; 1024];
         let mut completed_response: Option<String> = None;
         while now_ms().saturating_sub(started) < ACCOUNT_USAGE_TIMEOUT_MS {
+            #[cfg(windows)]
+            if wait_pipe_readable(
+                &stdout,
+                ACCOUNT_USAGE_TIMEOUT_MS.saturating_sub(now_ms().saturating_sub(started)),
+            )
+            .is_err()
+            {
+                break;
+            }
             match stdout.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(n) => {
+                    if buffer.len() + n > 1024 * 1024 {
+                        break;
+                    }
                     buffer.extend_from_slice(&chunk[..n]);
                     if let Some(idx) = buffer.iter().rposition(|byte| *byte == b'\n') {
                         let text = String::from_utf8_lossy(&buffer[..idx]).into_owned();
@@ -1375,7 +1364,28 @@ fn codex_command_candidates() -> Vec<PathBuf> {
     #[cfg(windows)]
     {
         if let Some(app_data) = std::env::var_os("APPDATA") {
-            candidates.push(PathBuf::from(app_data).join("npm").join("codex.cmd"));
+            let npm = PathBuf::from(app_data).join("npm");
+            let arch = if cfg!(target_arch = "aarch64") {
+                "arm64"
+            } else {
+                "x64"
+            };
+            let target = if cfg!(target_arch = "aarch64") {
+                "aarch64-pc-windows-msvc"
+            } else {
+                "x86_64-pc-windows-msvc"
+            };
+            let native = npm
+                .join("node_modules/@openai/codex/node_modules/@openai")
+                .join(format!("codex-win32-{arch}"))
+                .join("vendor")
+                .join(target)
+                .join("codex/codex.exe");
+            candidates.push(if native.is_file() {
+                native
+            } else {
+                npm.join("codex.cmd")
+            });
         }
         if let Some(program_files) = std::env::var_os("ProgramFiles") {
             candidates.push(
@@ -1427,19 +1437,7 @@ fn parse_account_usage_payload(payload: &Value, observed_at_ms: u64) -> Option<C
         .and_then(Value::as_object);
     let codex_entry = by_id.and_then(|map| map.get("codex"));
     let limits = codex_entry.or_else(|| payload.get("rateLimits"))?;
-    let spark = by_id.and_then(|map| {
-        map.iter()
-            .find(|(key, value)| {
-                key.as_str() != "codex"
-                    && value
-                        .get("limitName")
-                        .and_then(Value::as_str)
-                        .map(|name| name.to_ascii_lowercase().contains("spark"))
-                        .unwrap_or(false)
-            })
-            .map(|(key, value)| (key.clone(), value.clone()))
-    });
-    Some(CodexUsage {
+    Some(normalize_usage(CodexUsage {
         limit_id: limits
             .get("limitId")
             .and_then(Value::as_str)
@@ -1447,18 +1445,11 @@ fn parse_account_usage_payload(payload: &Value, observed_at_ms: u64) -> Option<C
         primary: parse_account_limit(limits.get("primary"), observed_at_ms),
         secondary: parse_account_limit(limits.get("secondary"), observed_at_ms),
         credits_remaining: parse_credits(limits.get("credits")),
-        spark_limit_id: spark.as_ref().map(|(key, _)| key.clone()),
-        spark_label: spark
-            .as_ref()
-            .and_then(|(_, value)| value.get("limitName").and_then(Value::as_str))
+        plan_type: limits
+            .get("planType")
+            .and_then(Value::as_str)
             .map(str::to_string),
-        spark_primary: spark
-            .as_ref()
-            .and_then(|(_, value)| parse_account_limit(value.get("primary"), observed_at_ms)),
-        spark_secondary: spark
-            .as_ref()
-            .and_then(|(_, value)| parse_account_limit(value.get("secondary"), observed_at_ms)),
-    })
+    }))
 }
 
 fn parse_usage_line(line: &str, observed_at_ms: u64) -> Option<CodexUsage> {
@@ -1471,7 +1462,7 @@ fn parse_usage_line(line: &str, observed_at_ms: u64) -> Option<CodexUsage> {
         return None;
     }
     let limits = payload.get("rate_limits")?;
-    Some(CodexUsage {
+    Some(normalize_usage(CodexUsage {
         limit_id: limits
             .get("limit_id")
             .and_then(Value::as_str)
@@ -1482,17 +1473,44 @@ fn parse_usage_line(line: &str, observed_at_ms: u64) -> Option<CodexUsage> {
             .get("credits")
             .and_then(|credits| credits.get("remaining").or_else(|| credits.get("balance")))
             .and_then(Value::as_f64),
-        spark_limit_id: None,
-        spark_label: None,
-        spark_primary: None,
-        spark_secondary: None,
-    })
+        plan_type: limits
+            .get("plan_type")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    }))
+}
+
+// Slots vary by plan: classify windows before applying the visibility switches.
+fn normalize_usage(mut usage: CodexUsage) -> CodexUsage {
+    let primary = usage.primary.take();
+    let secondary = usage.secondary.take();
+    for (limit, fallback) in [(primary, 300), (secondary, 10080)] {
+        if let Some(limit) = limit {
+            match limit.window_minutes.unwrap_or(fallback) {
+                10080.. => usage.secondary = Some(limit),
+                300 => usage.primary = Some(limit),
+                _ => {}
+            }
+        }
+    }
+    if usage
+        .plan_type
+        .as_deref()
+        .is_some_and(|plan| plan.to_ascii_lowercase().starts_with("pro"))
+    {
+        usage.primary = None;
+    }
+    usage
 }
 
 fn parse_limit(value: Option<&Value>, observed_at_ms: u64) -> Option<LimitSnapshot> {
     let value = value?;
     Some(LimitSnapshot {
         used_percent: value.get("used_percent")?.as_f64()?,
+        window_minutes: value
+            .get("window_minutes")
+            .and_then(Value::as_f64)
+            .map(|minutes| minutes.round().max(0.0) as u64),
         resets_at_ms: value
             .get("resets_at")
             .and_then(Value::as_u64)
@@ -1505,6 +1523,10 @@ fn parse_account_limit(value: Option<&Value>, observed_at_ms: u64) -> Option<Lim
     let value = value?;
     Some(LimitSnapshot {
         used_percent: value.get("usedPercent")?.as_f64()?,
+        window_minutes: value
+            .get("windowDurationMins")
+            .and_then(Value::as_f64)
+            .map(|minutes| minutes.round().max(0.0) as u64),
         resets_at_ms: value
             .get("resetsAt")
             .and_then(Value::as_u64)
@@ -1629,409 +1651,11 @@ fn read_tail_lines(path: &Path, max_bytes: u64) -> Option<Vec<String>> {
     Some(lines)
 }
 
-// ── Per-model cost tracking ────────────────────────────────────────────────
-// Codex bills per token like the OpenAI API. There is no aggregate usage file
-// (no ~/.codex equivalent of ~/.claude.json), so spend is reconstructed from the
-// rollout logs and summed per session.
-
-// Classifies a model id (matched case-insensitively) to its family label and
-// (input, output) USD-per-million rates. Cached input is always input * 0.1.
-// Order matters: "codex"/"nano"/"mini" are tested before the generic "gpt-5.4"
-// so e.g. "gpt-5.4-mini" classifies as Mini, not GPT-5.4.
-fn model_pricing(model_id: &str) -> Option<(&'static str, f64, f64)> {
-    let id = model_id.to_ascii_lowercase();
-    if id.contains("codex") {
-        Some(("Codex", 1.75, 14.00))
-    } else if id.contains("gpt-5.5") {
-        Some(("GPT-5.5", 5.00, 30.00))
-    } else if id.contains("nano") {
-        Some(("Nano", 0.20, 1.25))
-    } else if id.contains("mini") {
-        Some(("Mini", 0.75, 4.50))
-    } else if id.contains("gpt-5.4") {
-        Some(("GPT-5.4", 2.50, 15.00))
-    } else {
-        None
-    }
-}
-
-// Per-model cost for a single rollout. Each turn's token delta (`last_token_usage`)
-// is attributed to the model active at that turn (the latest `turn_context.model`),
-// so a session that switches models is split correctly. The whole file is read
-// because the model can change mid-session and every turn's delta counts.
-fn rollout_model_costs(path: &Path) -> Vec<ModelCost> {
-    match fs::read_to_string(path) {
-        Ok(raw) => rollout_model_costs_from_str(&raw),
-        Err(_) => Vec::new(),
-    }
-}
-
-fn rollout_model_costs_from_str(raw: &str) -> Vec<ModelCost> {
-    let mut by_family: HashMap<&'static str, ModelCost> = HashMap::new();
-    let mut current_model: Option<String> = None;
-    for line in raw.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let entry: Value = match serde_json::from_str(line) {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        match entry.get("type").and_then(Value::as_str) {
-            Some("turn_context") => {
-                if let Some(model) = entry
-                    .get("payload")
-                    .and_then(|payload| payload.get("model"))
-                    .and_then(Value::as_str)
-                {
-                    current_model = Some(model.to_string());
-                }
-            }
-            Some("event_msg") => {
-                let Some(payload) = entry.get("payload") else {
-                    continue;
-                };
-                if payload.get("type").and_then(Value::as_str) != Some("token_count") {
-                    continue;
-                }
-                let Some(delta) = payload
-                    .get("info")
-                    .and_then(|info| info.get("last_token_usage"))
-                else {
-                    continue;
-                };
-                let Some((label, input_rate, output_rate)) =
-                    current_model.as_deref().and_then(model_pricing)
-                else {
-                    continue;
-                };
-                let tok = |key: &str| delta.get(key).and_then(Value::as_u64).unwrap_or(0);
-                let input = tok("input_tokens");
-                let output = tok("output_tokens");
-                // cached_input_tokens is a subset of input_tokens; clamp defensively.
-                let cached = tok("cached_input_tokens").min(input);
-                let reasoning = tok("reasoning_output_tokens");
-                let uncached = input - cached;
-                // OpenAI cost: uncached input at full rate, cached input at 0.1x,
-                // output (reasoning included) at the output rate. No cache-write cost.
-                let input_cost = (uncached as f64 * input_rate
-                    + cached as f64 * input_rate * CACHED_INPUT_MULT)
-                    / 1_000_000.0;
-                let output_cost = (output + reasoning) as f64 / 1_000_000.0 * output_rate;
-                let bucket = by_family.entry(label).or_insert_with(|| ModelCost {
-                    label: label.to_string(),
-                    ..ModelCost::default()
-                });
-                bucket.input_tokens += input;
-                bucket.output_tokens += output;
-                bucket.cache_read_tokens += cached;
-                bucket.input_cost += input_cost;
-                bucket.output_cost += output_cost;
-                bucket.cost_usd += input_cost + output_cost;
-            }
-            _ => {}
-        }
-    }
-    let mut models: Vec<ModelCost> = by_family.into_values().collect();
-    sort_costs(&mut models);
-    models
-}
-
-// Live session (`current`) + every rollout summed per family (`all`). Throttled
-// to COST_REFRESH_MS and backed by a per-file mtime cache, so steady state only
-// re-reads the growing live rollout rather than the whole history.
-fn read_codex_costs(machine: &mut StateMachine) -> Option<CodexCosts> {
-    let now = now_ms();
-    // Throttle on the timestamp alone (not on `cached_costs.is_some()`): a None
-    // result must also be cached for COST_REFRESH_MS, otherwise a sessions dir with
-    // no billable models would re-walk the whole tree on every 5s tick.
-    if machine.cached_costs_at_ms != 0
-        && now.saturating_sub(machine.cached_costs_at_ms) < COST_REFRESH_MS
-    {
-        return machine.cached_costs.clone();
-    }
-
-    // u64::MAX age = no cutoff: lifetime totals span every session.
-    let files = find_recent_rollout_files(&sessions_dir(), u64::MAX);
-
-    let mut all: HashMap<String, ModelCost> = HashMap::new();
-    let mut by_project: HashMap<String, HashMap<String, ModelCost>> = HashMap::new();
-    let mut live_cwd: Option<String> = None;
-    let mut live_costs: Vec<ModelCost> = Vec::new();
-    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-
-    for (index, (path, mtime)) in files.iter().enumerate() {
-        seen.insert(path.clone());
-        let cached_hit = machine
-            .cost_cache
-            .get(path)
-            .filter(|(cached_mtime, _, _)| *cached_mtime == *mtime)
-            .map(|(_, cwd, costs)| (cwd.clone(), costs.clone()));
-        let (cwd, costs) = match cached_hit {
-            Some(hit) => hit,
-            None => {
-                let cwd = rollout_cwd(path);
-                let costs = rollout_model_costs(path);
-                machine
-                    .cost_cache
-                    .insert(path.clone(), (*mtime, cwd.clone(), costs.clone()));
-                (cwd, costs)
-            }
-        };
-        // The newest rollout is the live session; its cwd is the current project.
-        if index == 0 {
-            live_cwd = cwd.clone();
-            live_costs = costs.clone();
-        }
-        for model in &costs {
-            let bucket = all.entry(model.label.clone()).or_insert_with(|| ModelCost {
-                label: model.label.clone(),
-                ..ModelCost::default()
-            });
-            add_cost(bucket, model);
-        }
-        if let Some(cwd) = &cwd {
-            let project = by_project.entry(cwd.clone()).or_default();
-            for model in &costs {
-                let bucket = project
-                    .entry(model.label.clone())
-                    .or_insert_with(|| ModelCost {
-                        label: model.label.clone(),
-                        ..ModelCost::default()
-                    });
-                add_cost(bucket, model);
-            }
-        }
-    }
-    machine.cost_cache.retain(|path, _| seen.contains(path));
-
-    let mut all: Vec<ModelCost> = all.into_values().collect();
-    sort_costs(&mut all);
-
-    // Current project = every session under the live session's cwd; fall back to
-    // the live session alone when no cwd is recorded.
-    let current = match live_cwd.as_ref().and_then(|cwd| by_project.remove(cwd)) {
-        Some(map) => {
-            let mut models: Vec<ModelCost> = map.into_values().collect();
-            sort_costs(&mut models);
-            models
-        }
-        None => {
-            sort_costs(&mut live_costs);
-            live_costs
-        }
-    };
-
-    let costs = if all.is_empty() && current.is_empty() {
-        None
-    } else {
-        Some(CodexCosts {
-            current,
-            all,
-            show_cost: false,
-            show_cost_total: false,
-            show_project_tokens: false,
-            show_all_tokens: false,
-        })
-    };
-    machine.cached_costs = costs.clone();
-    machine.cached_costs_at_ms = now;
-    costs
-}
-
-// Current working directory recorded in a rollout's session_meta (first line),
-// normalized for matching. Used to group sessions by project.
-fn rollout_cwd(path: &Path) -> Option<String> {
-    let first = read_first_line(path)?;
-    let obj: Value = serde_json::from_str(first.trim()).ok()?;
-    if obj.get("type").and_then(Value::as_str) != Some("session_meta") {
-        return None;
-    }
-    obj.get("payload")
-        .and_then(|payload| payload.get("cwd"))
-        .and_then(Value::as_str)
-        .map(normalize_project_path)
-}
-
 fn normalize_project_path(path: &str) -> String {
-    path.replace('\\', "/").to_ascii_lowercase()
-}
-
-fn sort_costs(models: &mut [ModelCost]) {
-    models.sort_by(|a, b| {
-        b.cost_usd
-            .partial_cmp(&a.cost_usd)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-}
-
-fn add_cost(bucket: &mut ModelCost, model: &ModelCost) {
-    bucket.input_tokens += model.input_tokens;
-    bucket.output_tokens += model.output_tokens;
-    bucket.cache_read_tokens += model.cache_read_tokens;
-    bucket.cache_creation_tokens += model.cache_creation_tokens;
-    bucket.input_cost += model.input_cost;
-    bucket.output_cost += model.output_cost;
-    bucket.cost_usd += model.cost_usd;
-}
-
-fn format_cost(value: f64) -> String {
-    format!("${value:.2}")
-}
-
-fn format_tokens(count: u64) -> String {
-    if count >= 1_000_000_000 {
-        format!("{:.1}B", count as f64 / 1_000_000_000.0)
-    } else if count >= 1_000_000 {
-        format!("{:.1}M", count as f64 / 1_000_000.0)
-    } else if count >= 1_000 {
-        format!("{:.0}K", count as f64 / 1_000.0)
-    } else {
-        count.to_string()
-    }
-}
-
-// "Codex $0.45 · GPT-5.5 $1.23 · +1" — per-model spend for the live session.
-fn build_cost_line(current: &[ModelCost]) -> Option<String> {
-    let positives: Vec<&ModelCost> = current
-        .iter()
-        .filter(|model| model.cost_usd > 0.0)
-        .collect();
-    if positives.is_empty() {
-        return None;
-    }
-    const TOP: usize = 3;
-    let mut parts: Vec<String> = positives
-        .iter()
-        .take(TOP)
-        .map(|model| format!("{} {}", model.label, format_cost(model.cost_usd)))
-        .collect();
-    if positives.len() > TOP {
-        parts.push(format!("+{}", positives.len() - TOP));
-    }
-    Some(parts.join(" · "))
-}
-
-// "($321.99)" — lifetime total across all sessions.
-fn build_cost_total_line(all: &[ModelCost]) -> Option<String> {
-    let total: f64 = all.iter().map(|model| model.cost_usd).sum();
-    (total > 0.0).then(|| format!("({})", format_cost(total)))
-}
-
-fn sum_tokens(models: &[ModelCost]) -> (u64, u64) {
-    models.iter().fold((0u64, 0u64), |(input, output), model| {
-        (input + model.input_tokens, output + model.output_tokens)
-    })
-}
-
-// "84K in / 451K out" — current project tokens. Labelled because for Codex the
-// input (the full context resent and billed each turn) dwarfs the output, so an
-// unlabelled "big/small" reads as reversed. Cached input and reasoning are folded
-// into cost, not these displayed counts.
-fn build_tokens_line(current: &[ModelCost]) -> Option<String> {
-    let (input, output) = sum_tokens(current);
-    (input > 0 || output > 0).then(|| {
-        format!(
-            "{} in / {} out",
-            format_tokens(input),
-            format_tokens(output)
-        )
-    })
-}
-
-// "Σ 6.5M in / 13.2M out" — tokens summed across every project.
-fn build_all_tokens_line(all: &[ModelCost]) -> Option<String> {
-    let (input, output) = sum_tokens(all);
-    (input > 0 || output > 0).then(|| {
-        format!(
-            "\u{03a3} {} in / {} out",
-            format_tokens(input),
-            format_tokens(output)
-        )
-    })
-}
-
-// Detail field appended to the local status line. Each of the four views is
-// emitted only when its toggle is on: project cost, all-projects cost total,
-// project tokens, all-projects tokens.
-fn build_cost_status(costs: Option<&CodexCosts>) -> String {
-    let Some(costs) = costs else {
-        return String::new();
-    };
-    let mut parts = Vec::new();
-    if costs.show_cost {
-        if let Some(line) = build_cost_line(&costs.current) {
-            parts.push(line);
-        }
-    }
-    if costs.show_cost_total {
-        if let Some(total) = build_cost_total_line(&costs.all) {
-            parts.push(total);
-        }
-    }
-    if costs.show_project_tokens {
-        if let Some(tokens) = build_tokens_line(&costs.current) {
-            parts.push(tokens);
-        }
-    }
-    if costs.show_all_tokens {
-        if let Some(tokens) = build_all_tokens_line(&costs.all) {
-            parts.push(tokens);
-        }
-    }
-    if parts.is_empty() {
-        String::new()
-    } else {
-        format!("Cost: {}", parts.join(" · "))
-    }
-}
-
-// Compact total ("$0.45") for the Discord presence; appended last so the
-// state-line length fit drops it before any usage percentage. Prefers the
-// current-project total, falling back to the all-projects total.
-fn compact_cost_part(result: &DetectionResult) -> Option<String> {
-    let costs = result.costs.as_ref()?;
-    if costs.show_cost {
-        let total: f64 = costs.current.iter().map(|model| model.cost_usd).sum();
-        if total > 0.0 {
-            return Some(format_cost(total));
-        }
-    }
-    if costs.show_cost_total {
-        let total: f64 = costs.all.iter().map(|model| model.cost_usd).sum();
-        if total > 0.0 {
-            return Some(format_cost(total));
-        }
-    }
-    None
-}
-
-// Compact tokens ("84K in / 451K out" or "Σ 6.5M in / 13.2M out") for the Discord
-// presence. Prefers the current-project tokens, falling back to the all-projects.
-fn compact_tokens_part(result: &DetectionResult) -> Option<String> {
-    let costs = result.costs.as_ref()?;
-    if costs.show_project_tokens {
-        let (input, output) = sum_tokens(&costs.current);
-        if input > 0 || output > 0 {
-            return Some(format!(
-                "{} in / {} out",
-                format_tokens(input),
-                format_tokens(output)
-            ));
-        }
-    }
-    if costs.show_all_tokens {
-        let (input, output) = sum_tokens(&costs.all);
-        if input > 0 || output > 0 {
-            return Some(format!(
-                "\u{03a3} {} in / {} out",
-                format_tokens(input),
-                format_tokens(output)
-            ));
-        }
-    }
-    None
+    strip_windows_long_prefix(path)
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_ascii_lowercase()
 }
 
 struct DiscordIpc {
@@ -2064,18 +1688,13 @@ impl Read for IpcConnection {
 // Named pipes opened as files block forever on read; poll with PeekNamedPipe
 // so a stalled Discord client cannot hang the daemon loop.
 #[cfg(windows)]
-fn wait_pipe_readable(file: &File, timeout_ms: u64) -> std::io::Result<()> {
+fn wait_pipe_readable(file: &impl AsRawHandle, timeout_ms: u64) -> std::io::Result<()> {
     let handle = HANDLE(file.as_raw_handle());
     let deadline = now_ms() + timeout_ms;
     loop {
         let mut available = 0u32;
         unsafe { PeekNamedPipe(handle, None, 0, None, Some(&mut available), None) }.map_err(
-            |_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::ConnectionAborted,
-                    "discord ipc closed",
-                )
-            },
+            |_| std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "discord ipc closed"),
         )?;
         if available > 0 {
             return Ok(());
@@ -2370,6 +1989,8 @@ fn format_effort(effort: &str) -> Option<String> {
         "medium" => "Medium",
         "high" => "High",
         "xhigh" | "extra-high" => "Extra High",
+        "max" => "Max",
+        "ultra" => "Ultra",
         _ => effort,
     };
     sanitize_field(Some(label), 16)
@@ -2420,7 +2041,6 @@ fn small_image_key(state: PresenceState) -> &'static str {
         PresenceState::Cli => "cli_badge",
         PresenceState::App => "app_badge",
         PresenceState::Both => "combo_badge",
-        PresenceState::Monitor => "codex_logo",
         PresenceState::Idle => "codex_logo",
     }
 }
@@ -2430,56 +2050,15 @@ fn small_image_text(state: PresenceState) -> &'static str {
         PresenceState::Cli => "Codex CLI",
         PresenceState::App => "Codex Desktop",
         PresenceState::Both => "CLI + Desktop",
-        PresenceState::Monitor => "Monitoring",
         PresenceState::Idle => "Codex",
     }
 }
 
 fn presence_key(result: &DetectionResult, settings: &RpcSettings) -> String {
     format!(
-        "{:?}|{:?}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
-        result.state,
-        result.started_at_ms,
-        result
-            .codex
-            .as_ref()
-            .and_then(|cfg| cfg.model.as_deref())
-            .unwrap_or(""),
-        result
-            .codex
-            .as_ref()
-            .and_then(|cfg| cfg.effort.as_deref())
-            .unwrap_or(""),
-        result
-            .codex
-            .as_ref()
-            .and_then(|cfg| cfg.service_tier.as_deref())
-            .unwrap_or(""),
-        result
-            .session
-            .as_ref()
-            .map(|session| session.repo_name.as_str())
-            .unwrap_or(""),
-        format_usage(result.usage.as_ref()).unwrap_or_default(),
-        settings.mode,
-        settings.show_primary_usage,
-        settings.show_weekly_usage,
-        settings.show_spark_primary_usage,
-        settings.show_spark_weekly_usage,
-        settings.show_effort,
-        settings.show_fast_mode,
-        settings.show_credits,
-        settings.show_cost,
-        settings.show_cost_total,
-        settings.show_project_tokens,
-        settings.show_all_tokens,
-        settings.always_on,
-        settings
-            .buttons
-            .iter()
-            .map(|button| format!("{}:{}", button.label, button.url))
-            .collect::<Vec<_>>()
-            .join(",")
+        "{:?}|{}",
+        result,
+        serde_json::to_string(settings).unwrap_or_default()
     )
 }
 
@@ -2506,6 +2085,20 @@ fn min_option(a: Option<u64>, b: Option<u64>) -> Option<u64> {
         (Some(a), None) => Some(a),
         (None, Some(b)) => Some(b),
         (None, None) => None,
+    }
+}
+
+/// Names a limit after the window Codex actually reports. Accounts without a 5h
+/// window now receive the weekly limit in the `primary` slot, so the slot alone
+/// can no longer name the row. `fallback` covers older rollout lines that carry
+/// no window at all.
+fn usage_label(limit: &LimitSnapshot, fallback: &str) -> String {
+    match limit.window_minutes {
+        Some(minutes) if minutes >= 7 * 24 * 60 => "week".into(),
+        Some(minutes) if minutes >= 24 * 60 => format!("{}d", minutes / (24 * 60)),
+        Some(minutes) if minutes >= 60 => format!("{}h", minutes / 60),
+        Some(minutes) => format!("{minutes}m"),
+        None => fallback.into(),
     }
 }
 
@@ -2579,6 +2172,67 @@ mod tests {
     use super::*;
 
     #[test]
+    fn desktop_helpers_and_rpc_probes_are_not_interactive_cli_sessions() {
+        let parents = HashMap::from([
+            (1, (0, "ChatGPT.exe".into())),
+            (2, (1, "powershell.exe".into())),
+            (3, (0, "codex-rich-presence.exe".into())),
+            (4, (3, "cmd.exe".into())),
+        ]);
+        let mut process = ProcessSnapshot {
+            owner: process_owner(2, &parents),
+            parent_name: Some("powershell.exe".into()),
+            executable_path: Some(r"C:\npm\node_modules\@openai\codex\codex.exe".into()),
+            creation_date_ms: None,
+        };
+        assert_eq!(classify_process(&process), PresenceState::App);
+        process.owner = process_owner(4, &parents);
+        assert_eq!(classify_process(&process), PresenceState::Idle);
+        process.owner = None;
+        assert_eq!(classify_process(&process), PresenceState::Cli);
+        process.executable_path =
+            Some(r"C:\Users\test\AppData\Local\OpenAI\Codex\bin\version\codex.exe".into());
+        assert_eq!(classify_process(&process), PresenceState::App);
+    }
+
+    #[test]
+    fn subscription_windows_and_discord_toggles_are_independent() {
+        for plan in ["pro", "prolite", "plus"] {
+            let payload = json!({"rateLimits": {"limitId":"codex", "planType":plan,
+                "primary":{"usedPercent":20,"windowDurationMins":300},
+                "secondary":{"usedPercent":11,"windowDurationMins":10080}}});
+            let usage = parse_account_usage_payload(&payload, 0).unwrap();
+            assert_eq!(usage.primary.is_some(), plan == "plus");
+            assert_eq!(remaining_percent(usage.secondary.as_ref().unwrap()), 89);
+            let mut result = DetectionResult {
+                usage: Some(usage),
+                ..DetectionResult::default()
+            };
+            let settings = RpcSettings {
+                show_primary_usage: false,
+                show_weekly_usage: false,
+                ..RpcSettings::default()
+            };
+            assert!(format_status_line(&result, &settings, None).contains("week 89% left"));
+            filter_usage(&mut result, &settings);
+            assert!(result.usage.as_ref().unwrap().secondary.is_none());
+            assert!(build_activity(&result, &settings).is_none());
+        }
+    }
+
+    #[test]
+    #[ignore = "Requires an installed Codex CLI and a signed-in account"]
+    fn live_account_usage() {
+        let usage = read_codex_account_usage_uncached().expect("Codex account usage unavailable");
+        println!(
+            "plan={:?} {}",
+            usage.plan_type,
+            format_usage(Some(&usage)).unwrap_or_default()
+        );
+        assert!(usage.primary.is_some() || usage.secondary.is_some());
+    }
+
+    #[test]
     fn state_and_status_include_fast_service_tier() {
         let result = DetectionResult {
             state: PresenceState::Cli,
@@ -2644,89 +2298,53 @@ service_tier = "fast"
     }
 
     #[test]
-    fn model_pricing_classifier_order() {
-        assert_eq!(model_pricing("gpt-5.3-codex").unwrap().0, "Codex");
-        assert_eq!(model_pricing("gpt-5.5").unwrap().0, "GPT-5.5");
-        assert_eq!(model_pricing("gpt-5.4-nano").unwrap().0, "Nano");
-        assert_eq!(model_pricing("gpt-5.4-mini").unwrap().0, "Mini");
-        assert_eq!(model_pricing("gpt-5.4").unwrap().0, "GPT-5.4");
-        // "codex" wins even when other substrings are present.
-        assert_eq!(model_pricing("gpt-5.4-codex-mini").unwrap().0, "Codex");
-        assert!(model_pricing("o3").is_none());
-        assert!(model_pricing("gpt-4.1").is_none());
+    fn parse_utc_timestamp_ms_matches_known_epoch() {
+        assert_eq!(
+            parse_utc_timestamp_ms("2026-07-09T18:00:59.694Z"),
+            Some(1_783_620_059_694)
+        );
+        assert_eq!(parse_utc_timestamp_ms("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(parse_utc_timestamp_ms("not-a-date"), None);
     }
 
     #[test]
-    fn rollout_costs_attribute_deltas_per_model() {
-        // Real rollout shape: session_meta has no model; turn_context sets it;
-        // token_count carries cumulative + per-turn (last_token_usage) deltas.
-        let raw = concat!(
-            r#"{"type":"session_meta","payload":{"cwd":"d:/x","model_provider":"openai"}}"#,
-            "\n",
-            r#"{"type":"turn_context","payload":{"model":"gpt-5.5","effort":"high"}}"#,
-            "\n",
-            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1000000,"cached_input_tokens":200000,"output_tokens":500000,"reasoning_output_tokens":100000,"total_tokens":1600000}}}}"#,
-            "\n",
-            r#"{"type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
-            "\n",
-            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":400000,"cached_input_tokens":400000,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":400000}}}}"#,
-            "\n",
-        );
-        let models = rollout_model_costs_from_str(raw);
-        assert_eq!(models.len(), 2);
-
-        // Sorted by cost desc: GPT-5.5 first.
-        let gpt = &models[0];
-        assert_eq!(gpt.label, "GPT-5.5");
-        // input: (800k*5 + 200k*0.5)/1e6 = 4.1 ; output: 600k/1e6*30 = 18.0
-        assert!(
-            (gpt.input_cost - 4.1).abs() < 1e-9,
-            "input_cost={}",
-            gpt.input_cost
-        );
-        assert!(
-            (gpt.output_cost - 18.0).abs() < 1e-9,
-            "output_cost={}",
-            gpt.output_cost
-        );
-        assert!(
-            (gpt.cost_usd - 22.1).abs() < 1e-9,
-            "cost_usd={}",
-            gpt.cost_usd
-        );
-        assert_eq!(gpt.input_tokens, 1_000_000);
-        assert_eq!(gpt.output_tokens, 500_000);
-        assert_eq!(gpt.cache_read_tokens, 200_000);
-        assert_eq!(gpt.cache_creation_tokens, 0);
-
-        let codex = &models[1];
-        assert_eq!(codex.label, "Codex");
-        // fully cached input: 400k*1.75*0.1/1e6 = 0.07 ; no output.
-        assert!(
-            (codex.cost_usd - 0.07).abs() < 1e-9,
-            "cost_usd={}",
-            codex.cost_usd
-        );
-        assert_eq!(codex.cache_read_tokens, 400_000);
+    fn turn_context_line_carries_timestamp() {
+        let line = r#"{"timestamp":"2026-07-09T18:00:59.694Z","type":"turn_context","payload":{"model":"gpt-5.6-sol","effort":"ultra"}}"#;
+        let (cfg, ts) = parse_turn_context_line(line).unwrap();
+        assert_eq!(cfg.model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(cfg.effort.as_deref(), Some("ultra"));
+        assert_eq!(ts, Some(1_783_620_059_694));
     }
 
     #[test]
-    fn rollout_costs_skip_tokens_before_first_turn_context() {
-        // A token_count before any turn_context has no model to attribute to.
-        let raw = concat!(
-            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1000000,"output_tokens":1000000}}}}"#,
-            "\n",
-        );
-        assert!(rollout_model_costs_from_str(raw).is_empty());
+    fn usage_label_follows_the_reported_window() {
+        let limit = |window_minutes| LimitSnapshot {
+            used_percent: 11.0,
+            window_minutes,
+            resets_at_ms: None,
+            observed_at_ms: 0,
+        };
+        assert_eq!(usage_label(&limit(Some(10080)), "5h"), "week");
+        assert_eq!(usage_label(&limit(Some(300)), "week"), "5h");
+        assert_eq!(usage_label(&limit(Some(2880)), "5h"), "2d");
+        // Older rollout lines carry no window; the slot keeps naming the limit.
+        assert_eq!(usage_label(&limit(None), "week"), "week");
     }
 
     #[test]
-    fn format_tokens_scales_to_billions() {
-        assert_eq!(format_tokens(500), "500");
-        assert_eq!(format_tokens(84_000), "84K");
-        assert_eq!(format_tokens(1_500_000), "1.5M");
-        assert_eq!(format_tokens(999_000_000), "999.0M");
-        assert_eq!(format_tokens(1_000_000_000), "1.0B");
-        assert_eq!(format_tokens(2_500_000_000), "2.5B");
+    fn weekly_only_limits_are_not_labelled_5h() {
+        let line = r#"{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":11.0,"window_minutes":10080,"resets_at":null},"secondary":null}}}"#;
+        let usage = parse_usage_line(line, 0).unwrap();
+        assert_eq!(
+            usage.secondary.as_ref().unwrap().window_minutes,
+            Some(10080)
+        );
+        assert_eq!(format_usage(Some(&usage)).unwrap(), "Usage: week 89% left");
+    }
+
+    #[test]
+    fn format_effort_maps_new_levels() {
+        assert_eq!(format_effort("ultra").as_deref(), Some("Ultra"));
+        assert_eq!(format_effort("max").as_deref(), Some("Max"));
     }
 }

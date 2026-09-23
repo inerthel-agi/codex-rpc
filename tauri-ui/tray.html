@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Codex RPC Menu</title>
     <link rel="stylesheet" href="./tray.css" />
+    <script defer src="./usage.js"></script>
     <script defer src="./tray.js"></script>
   </head>
   <body>
@@ -18,28 +19,10 @@
         <span class="status-dot" id="status-dot" title="Status"></span>
       </header>
 
-      <div class="section-label">Usage</div>
+      <div class="section-label"><span>Usage</span><span id="plan">Subscription</span></div>
+      <!-- Rows are built from the limits the daemon reports (tray.js#renderUsage). -->
       <div class="usage" id="usage">
-        <div class="usage-row" data-usage="primary">
-          <span class="usage-label">5h</span>
-          <div class="usage-bar"><div class="usage-fill"></div></div>
-          <span class="usage-value">—</span>
-        </div>
-        <div class="usage-row" data-usage="secondary">
-          <span class="usage-label">Week</span>
-          <div class="usage-bar"><div class="usage-fill"></div></div>
-          <span class="usage-value">—</span>
-        </div>
-        <div class="usage-row" data-usage="spark_primary">
-          <span class="usage-label">Spark 5h</span>
-          <div class="usage-bar"><div class="usage-fill"></div></div>
-          <span class="usage-value">—</span>
-        </div>
-        <div class="usage-row" data-usage="spark_secondary">
-          <span class="usage-label">Spark week</span>
-          <div class="usage-bar"><div class="usage-fill"></div></div>
-          <span class="usage-value">—</span>
-        </div>
+        <div class="usage-empty">Waiting for Codex usage…</div>
       </div>
 
       <div class="separator"></div>

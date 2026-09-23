@@ -20,6 +20,15 @@ function toSnapshot(raw: RawProcess, parentName: string | null) {
 }
 
 describe('classifier', () => {
+  it('keeps Desktop helpers in Desktop mode and excludes RPC probes', () => {
+    const [raw] = parseScanOutput(loadFixture('wmi-npm-global.json'));
+    const process = toSnapshot(raw, 'powershell.exe');
+    expect(classify({ process: { ...process, owner: 'app' } }).kind).toBe('app');
+    expect(classify({ process: { ...process, owner: 'ignored' } }).kind).toBe('unknown');
+    expect(classify({ process }).kind).toBe('cli');
+    expect(classify({ process: { ...process, executablePath: 'C:\\Users\\test\\AppData\\Local\\OpenAI\\Codex\\bin\\version\\codex.exe' } }).kind).toBe('app');
+    expect(parseScanOutput(JSON.stringify({ ProcessId: 42, Owner: 'app' }))[0].owner).toBe('app');
+  });
   it('rule 1: canonical npm-global vendor path → cli', () => {
     const [raw] = parseScanOutput(loadFixture('wmi-npm-global.json'));
     const r = classify({ process: toSnapshot(raw, 'cmd.exe') });

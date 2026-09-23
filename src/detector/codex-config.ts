@@ -30,13 +30,22 @@ export function readCodexConfig(
   sessionsRoot: string = SESSIONS_ROOT,
 ): CodexConfig | null {
   let fileConfig: CodexConfig | null = null;
+  let fileMtimeMs = 0;
   try {
     const raw = fs.readFileSync(configPath, 'utf8');
     fileConfig = parseCodexConfig(raw);
+    fileMtimeMs = fs.statSync(configPath).mtimeMs;
   } catch {
     fileConfig = null;
   }
-  const runtimeConfig = readLatestTurnContextConfig(sessionsRoot);
+  let runtimeConfig = readLatestTurnContextConfig(sessionsRoot);
+  // A `/model` change rewrites config.toml immediately, but the last
+  // turn_context in the rollout log still carries the previous model until the
+  // next turn starts. When the config file is newer than the last recorded
+  // turn, trust the file — otherwise stale runtime data wins for minutes.
+  if (runtimeConfig && fileConfig && fileMtimeMs > runtimeConfig.timestampMs) {
+    runtimeConfig = null;
+  }
   if (!fileConfig && !runtimeConfig) return null;
   return {
     model: runtimeConfig?.model ?? fileConfig?.model ?? null,
@@ -68,20 +77,27 @@ function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function readLatestTurnContextConfig(root: string): Pick<CodexConfig, 'model' | 'effort'> | null {
+interface TurnContextConfig {
+  model: string | null;
+  effort: string | null;
+  /** When the turn started — from the rollout line's own timestamp, falling back to file mtime. */
+  timestampMs: number;
+}
+
+function readLatestTurnContextConfig(root: string): TurnContextConfig | null {
   const files = findRecentRolloutFiles(root, 24 * 60 * 60 * 1000);
   for (const file of files) {
     const lines = readTailLines(file.path);
     if (!lines) continue;
     for (let i = lines.length - 1; i >= 0; i--) {
-      const config = parseTurnContextLine(lines[i]);
+      const config = parseTurnContextLine(lines[i], file.mtimeMs);
       if (config) return config;
     }
   }
   return null;
 }
 
-function parseTurnContextLine(line: string): Pick<CodexConfig, 'model' | 'effort'> | null {
+function parseTurnContextLine(line: string, fallbackMtimeMs: number): TurnContextConfig | null {
   try {
     const obj = JSON.parse(line);
     if (obj?.type !== 'turn_context') return null;
@@ -89,7 +105,8 @@ function parseTurnContextLine(line: string): Pick<CodexConfig, 'model' | 'effort
     const model = typeof payload?.model === 'string' ? payload.model : null;
     const effort = typeof payload?.effort === 'string' ? payload.effort : null;
     if (!model && !effort) return null;
-    return { model, effort };
+    const parsed = typeof obj.timestamp === 'string' ? Date.parse(obj.timestamp) : NaN;
+    return { model, effort, timestampMs: Number.isNaN(parsed) ? fallbackMtimeMs : parsed };
   } catch {
     return null;
   }
@@ -160,6 +177,8 @@ export function formatEffort(effort: string | null): string | null {
     high: 'High',
     xhigh: 'Extra High',
     'extra-high': 'Extra High',
+    max: 'Max',
+    ultra: 'Ultra',
   };
   return map[effort.toLowerCase()] ?? effort;
 }

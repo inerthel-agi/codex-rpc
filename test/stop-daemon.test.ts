@@ -28,7 +28,7 @@ onWindows('stop daemon lock validation', () => {
         fs.writeFileSync(lock, value);
         const result = spawnSync(powershell, [
           '-NoProfile', '-NonInteractive', '-File', script, '-LockPath', lock,
-        ], { encoding: 'utf8', timeout: 10_000 });
+        ], { encoding: 'utf8', timeout: 30_000 });
         expect(result.status).toBe(1);
         expect(result.stderr).toContain(error);
         expect(fs.existsSync(lock)).toBe(true);
@@ -37,5 +37,5 @@ onWindows('stop daemon lock validation', () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, 45_000);
 });

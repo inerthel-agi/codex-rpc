@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Codex RPC</title>
+  <link rel="stylesheet" href="./common.css" />
   <link rel="stylesheet" href="./styles.css" />
   <script defer src="./usage.js"></script>
   <script defer src="./main.js"></script>
@@ -14,9 +15,6 @@
       <div class="titlebar-controls">
         <button type="button" class="titlebar-button" id="titlebar-minimize" aria-label="Minimize" title="Minimize">
           <svg width="11" height="11" viewBox="0 0 11 11" aria-hidden="true"><line x1="1" y1="5.5" x2="10" y2="5.5" stroke="currentColor" stroke-width="1" /></svg>
-        </button>
-        <button type="button" class="titlebar-button" id="titlebar-maximize" aria-label="Maximize" title="Maximize">
-          <svg width="11" height="11" viewBox="0 0 11 11" aria-hidden="true"><rect x="1.5" y="1.5" width="8" height="8" fill="none" stroke="currentColor" stroke-width="1" /></svg>
         </button>
         <button type="button" class="titlebar-button close" id="titlebar-close" aria-label="Close" title="Close">
           <svg width="11" height="11" viewBox="0 0 11 11" aria-hidden="true"><line x1="1.5" y1="1.5" x2="9.5" y2="9.5" stroke="currentColor" stroke-width="1" /><line x1="9.5" y1="1.5" x2="1.5" y2="9.5" stroke="currentColor" stroke-width="1" /></svg>
@@ -32,7 +30,7 @@
         <button type="button" data-theme-option="light">Light</button>
       </div>
     </header>
-    <section class="usage-panel" aria-labelledby="usage-title">
+    <section class="card usage-panel" aria-labelledby="usage-title">
       <div class="section-heading"><h2 id="usage-title">Usage</h2><span id="plan" class="plan">Subscription</span></div>
       <div id="usage" class="usage"><p class="usage-empty">Waiting for Codex usage…</p></div>
       <p class="note" id="plan-hint">Limits update automatically from your Codex account.</p>
@@ -43,29 +41,27 @@
         <label for="mode">Activity</label>
         <select id="mode"><option value="playing">Playing</option><option value="watching">Watching</option><option value="listening">Listening</option><option value="competing">Competing</option></select>
       </div>
-      <div class="setting-row"><span>Usage on your profile</span><div class="checks">
+      <div class="setting-row"><span>Show on profile</span><div class="checks">
         <label id="usage-5h-option"><input type="checkbox" id="usage-5h-toggle" />5 hours</label>
         <label><input type="checkbox" id="usage-week-toggle" />Week</label>
-      </div></div>
-      <div class="setting-row"><span>Details</span><div class="checks">
         <label><input type="checkbox" id="effort-toggle" />Effort</label>
         <label><input type="checkbox" id="fast-mode-toggle" />Fast mode</label>
         <label><input type="checkbox" id="credits-toggle" />Credits</label>
       </div></div>
-      <div class="rpc-preview" aria-label="Discord preview">
+      <div class="card rpc-preview" aria-label="Discord preview">
         <img class="preview-icon" src="./codex_logo.png" alt="" />
         <div class="preview-copy"><strong id="preview-activity">Playing Codex</strong><span id="preview-details">No Codex activity</span><span id="preview-state">—</span><div id="preview-buttons" class="preview-buttons"></div></div>
-        <span class="preview-tag">PREVIEW</span>
+        <span class="preview-tag">Preview</span>
       </div>
     </section>
     <details class="links-section">
-      <summary>Profile buttons <span>Optional · Watching mode</span></summary>
+      <summary>Profile buttons <span id="links-hint">Optional</span></summary>
       <p class="note">Links are sent to Discord in Watching mode.</p>
       <div class="link-row"><label for="label0">Button 1</label><input id="label0" maxlength="32" aria-label="Button 1 label" placeholder="Label" /><input id="url0" type="url" aria-label="Button 1 URL" placeholder="https://…" /></div>
       <div class="link-row"><label for="label1">Button 2</label><input id="label1" maxlength="32" aria-label="Button 2 label" placeholder="Label" /><input id="url1" type="url" aria-label="Button 2 URL" placeholder="https://…" /></div>
       <div class="presets"><button type="button" data-preset="codex">Open Codex</button><button type="button" data-preset="usage">Usage</button><button type="button" data-preset="repo">GitHub repo</button><button type="button" id="clear" class="ghost">Clear</button></div>
     </details>
   </main>
-  <footer class="actions"><span id="message" role="status">Changes save automatically</span><button type="button" id="apply">Apply</button><button type="button" id="close" class="primary">Close</button></footer>
+  <footer class="actions"><span id="message" role="status">Changes save automatically</span><button type="button" id="close" class="primary">Close</button></footer>
 </body>
 </html>

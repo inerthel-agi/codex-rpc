@@ -1,17 +1,14 @@
 const invoke = window.__TAURI__.core.invoke;
 let signature = '';
 let previousHeight = 0;
-function applyTheme() {
-  const theme = localStorage.getItem('codex-rpc-theme') || 'dark';
-  document.body.dataset.theme = theme === 'system' ? (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark') : theme;
-}
 async function refresh() {
   try {
-    applyTheme();
+    Theme.apply();
     const snapshot = await invoke('tray_snapshot');
-    document.querySelector('#status-dot').classList.toggle('active', /CLI|Desktop/.test(snapshot.state));
-    document.querySelector('#status-dot').title = snapshot.state;
-    document.querySelector('#model-line').textContent = snapshot.model || snapshot.state;
+    const status = UsageView.statusLabel(snapshot.state);
+    document.querySelector('#status-dot').classList.toggle('active', UsageView.isActive(snapshot.state));
+    document.querySelector('#status-dot').title = status;
+    document.querySelector('#model-line').textContent = snapshot.model_parts.join(' · ') || status;
     document.querySelector('#plan').textContent = UsageView.planLabel(snapshot.plan);
     const next = JSON.stringify([snapshot.usage, snapshot.plan]);
     if (next !== signature) { UsageView.render(document.querySelector('#usage'), snapshot.usage, snapshot.plan); signature = next; }

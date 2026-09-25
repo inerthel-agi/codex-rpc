@@ -1,0 +1,31 @@
+/* Shared tokens and usage widgets for the settings window and the tray menu. */
+:root {
+  color-scheme: dark;
+  --bg: #111312; --panel: #191d1b; --input: #202522; --line: #2c342f;
+  --text: #eef2ef; --muted: #a7b3aa; --accent: #69d6a1; --track: #323d36;
+  --hover: #242b27; --danger: #f58181; --warn: #dfb86b;
+  font-family: "Segoe UI", sans-serif;
+}
+body[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f5f7f5; --panel: #fff; --input: #fff; --line: #d6ded8;
+  --text: #19271e; --muted: #516557; --accent: #137648; --track: #dae5dd;
+  --hover: #e8efe9; --danger: #b52d34; --warn: #a8741a;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+p { margin: 0; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.usage-row { display: grid; grid-template-columns: 1fr auto; gap: 6px 12px; }
+.usage-label { color: var(--muted); font-size: 12px; }
+.usage-value { color: var(--text); font-size: 12px; font-variant-numeric: tabular-nums; }
+.usage-empty { color: var(--muted); font-size: 12px; }
+progress { grid-column: 1 / -1; appearance: none; width: 100%; height: 6px; border: 0; border-radius: 3px; overflow: hidden; background: var(--track); }
+progress::-webkit-progress-bar { background: var(--track); }
+progress::-webkit-progress-value { background: var(--accent); border-radius: 3px; }
+progress.low::-webkit-progress-value { background: var(--warn); }
+progress.critical::-webkit-progress-value { background: var(--danger); }
+progress.unavailable { opacity: .4; }
+
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; } }

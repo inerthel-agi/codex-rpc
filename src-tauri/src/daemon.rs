@@ -922,7 +922,7 @@ fn format_status_line(
     let usage_line = format_usage(result.usage.as_ref()).unwrap_or_default();
     let discord = match discord_user {
         Some(user) => format!("Discord: Connected ({user})"),
-        None => "Discord: RPC Disabled".into(),
+        None => "Discord: Not connected".into(),
     };
     let plan = result
         .usage

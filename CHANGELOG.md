@@ -2,6 +2,15 @@
 
 All notable changes to Codex RPC are documented here.
 
+## [0.4.1] - 2026-09-25
+
+### Changed
+
+- Settings window: readable Codex status ("Connected to Codex Desktop"), plan shown once, usage and detail toggles merged into one "Show on profile" row, profile buttons flagged "Available in Watching mode" outside Watching mode. Removed the redundant Apply and Maximize buttons; default height reduced to 620.
+- Tray menu: model line uses `·` like the Discord preview, new start-at-login icon, and "Discord: Not connected" replaces "Discord: RPC Disabled".
+- Both windows share one color palette and stylesheet (`tauri-ui/common.css`) and theme helper.
+- `load_status` and `tray_snapshot` now return the same parsed status fields; the unused `daemon_status` command is removed.
+
 ## [0.4.0] - 2026-09-23
 
 ### Changed

@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Codex RPC Menu</title>
+    <link rel="stylesheet" href="./common.css" />
     <link rel="stylesheet" href="./tray.css" />
     <script defer src="./usage.js"></script>
     <script defer src="./tray.js"></script>
@@ -29,7 +30,9 @@
 
       <button type="button" class="item" id="item-startup">
         <svg class="item-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z" />
+          <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
+          <polyline points="10 17 15 12 10 7" />
+          <line x1="15" y1="12" x2="3" y2="12" />
         </svg>
         <span id="startup-label">Start on Windows</span>
         <span class="switch" id="startup-switch"><span class="knob"></span></span>

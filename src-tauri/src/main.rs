@@ -86,12 +86,15 @@ fn default_show_usage() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// Structured view of the `state|model|usage|discord|plan` line written by the daemon.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 struct AppStatus {
-    settings_path: String,
-    status_line: String,
-    usage: Vec<UsageEntry>,
+    state: String,
+    model_parts: Vec<String>,
+    credits: Option<String>,
+    discord: String,
     plan: String,
+    usage: Vec<UsageEntry>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -131,20 +134,50 @@ fn write_settings(settings: &RpcSettings) -> Result<(), String> {
     fs::write(path, json).map_err(|err| err.to_string())
 }
 
+fn read_status_line() -> String {
+    status_path()
+        .ok()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .map(|raw| raw.trim().to_string())
+        .unwrap_or_default()
+}
+
+fn parse_status_line(line: &str) -> AppStatus {
+    let mut parts = line.split('|').map(str::trim);
+    let state = parts.next().filter(|value| !value.is_empty()).unwrap_or("Codex: Off");
+    let model_parts = parts
+        .next()
+        .unwrap_or("")
+        .split(" - ")
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect();
+    let credits = parts.next().and_then(|usage| {
+        usage
+            .strip_prefix("Usage:")
+            .unwrap_or(usage)
+            .split('/')
+            .map(str::trim)
+            .find(|part| part.to_ascii_lowercase().starts_with("credits"))
+            .map(str::to_string)
+    });
+    let discord = parts.next().unwrap_or("").to_string();
+    let plan = parts.next().unwrap_or("").to_string();
+
+    AppStatus {
+        state: state.to_string(),
+        model_parts,
+        credits,
+        discord,
+        plan,
+        usage: parse_status_usage(line),
+    }
+}
+
 #[tauri::command]
 fn load_status() -> Result<AppStatus, String> {
-    let path = settings_path()?;
-    let status = status_path()?;
-    let status_line = fs::read_to_string(status)
-        .map(|value| value.trim().to_string())
-        .unwrap_or_else(|_| "Codex: Off".into());
-
-    Ok(AppStatus {
-        settings_path: path.to_string_lossy().into_owned(),
-        usage: parse_status_usage(&status_line),
-        plan: status_line.split('|').nth(4).unwrap_or("").to_string(),
-        status_line,
-    })
+    Ok(parse_status_line(&read_status_line()))
 }
 
 #[tauri::command]
@@ -153,11 +186,6 @@ fn start_daemon(
     state: tauri::State<'_, DaemonState>,
 ) -> Result<DaemonStatus, String> {
     start_daemon_inner(&app, &state);
-    Ok(read_daemon_status(&state))
-}
-
-#[tauri::command]
-fn daemon_status(state: tauri::State<'_, DaemonState>) -> Result<DaemonStatus, String> {
     Ok(read_daemon_status(&state))
 }
 
@@ -192,7 +220,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             save_settings,
             load_status,
             start_daemon,
-            daemon_status,
             close_settings,
             tray_snapshot,
             fit_tray,
@@ -343,38 +370,16 @@ fn hide_tray(app: tauri::AppHandle) {
 
 #[derive(Debug, Clone, Serialize)]
 struct TraySnapshot {
-    state: String,
-    model: String,
-    usage: Vec<UsageEntry>,
-    plan: String,
-    discord: String,
+    #[serde(flatten)]
+    status: AppStatus,
     startup_label: &'static str,
     startup_enabled: bool,
 }
 
 #[tauri::command]
 fn tray_snapshot() -> Result<TraySnapshot, String> {
-    let line = status_path()
-        .ok()
-        .and_then(|path| fs::read_to_string(path).ok())
-        .map(|raw| raw.trim().to_string())
-        .unwrap_or_default();
-    let mut parts = line.split('|');
-    let state = parts.next().unwrap_or("Codex: Off").trim().to_string();
-    let model = parts.next().unwrap_or("").trim().to_string();
-    let _usage_field = parts.next();
-    let discord = parts.next().unwrap_or("").trim().to_string();
-
     Ok(TraySnapshot {
-        state: if state.is_empty() {
-            "Codex: Off".into()
-        } else {
-            state
-        },
-        model,
-        usage: parse_status_usage(&line),
-        plan: line.split('|').nth(4).unwrap_or("").to_string(),
-        discord,
+        status: parse_status_line(&read_status_line()),
         startup_label: startup_menu_label(),
         startup_enabled: startup_enabled(),
     })
@@ -803,5 +808,37 @@ mod tests {
     fn status_usage_is_empty_without_a_usage_field() {
         assert!(parse_status_usage("Codex: Off||").is_empty());
         assert!(parse_status_usage("").is_empty());
+    }
+
+    #[test]
+    fn status_line_splits_every_field() {
+        let status = parse_status_line(
+            "Codex: Desktop|GPT-6-Astra - Medium - Fast|Usage: week 28% left / credits 12|Discord: Connected (user)|pro",
+        );
+        assert_eq!(status.state, "Codex: Desktop");
+        assert_eq!(status.model_parts, ["GPT-6-Astra", "Medium", "Fast"]);
+        assert_eq!(status.credits.as_deref(), Some("credits 12"));
+        assert_eq!(status.discord, "Discord: Connected (user)");
+        assert_eq!(status.plan, "pro");
+        assert_eq!(status.usage.len(), 1);
+    }
+
+    #[test]
+    fn status_line_without_credits_or_model() {
+        let status = parse_status_line("Codex: CLI||Usage: 5h 42% left|Discord: Not connected|plus");
+        assert!(status.model_parts.is_empty());
+        assert_eq!(status.credits, None);
+        assert_eq!(status.plan, "plus");
+    }
+
+    #[test]
+    fn empty_status_line_means_codex_is_off() {
+        for line in ["", "Codex: Off||||"] {
+            let status = parse_status_line(line);
+            assert_eq!(status.state, "Codex: Off");
+            assert!(status.model_parts.is_empty());
+            assert!(status.usage.is_empty());
+            assert_eq!(status.credits, None);
+        }
     }
 }

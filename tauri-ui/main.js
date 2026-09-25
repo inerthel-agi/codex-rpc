@@ -18,7 +18,7 @@ const toggles = {
 const message = document.querySelector('#message');
 let loading = true;
 let timer;
-let snapshot = { status_line: 'Codex: Off', usage: [], plan: '' };
+let snapshot = { state: 'Codex: Off', model_parts: [], credits: null, usage: [], plan: '' };
 
 function readForm() {
   return {
@@ -31,7 +31,7 @@ function readForm() {
 function writeForm(settings) {
   mode.value = settings.mode || 'playing';
   for (const [key, input] of Object.entries(toggles)) {
-    input.checked = settings[key] !== false && !(settings.show_usage === false && /usage|credits/.test(key));
+    input.checked = settings[key] !== false;
   }
   labels.forEach((label, i) => { label.value = settings.buttons?.[i]?.label || ''; urls[i].value = settings.buttons?.[i]?.url || ''; });
   syncButtons();
@@ -39,24 +39,23 @@ function writeForm(settings) {
 function syncButtons() {
   const enabled = mode.value === 'watching';
   for (const input of [...labels, ...urls, ...document.querySelectorAll('[data-preset], #clear')]) input.disabled = !enabled;
+  document.querySelector('#links-hint').textContent = enabled ? 'Optional' : 'Available in Watching mode';
 }
 function renderStatus(status) {
   snapshot = status;
-  const [state = 'Codex: Off'] = status.status_line.split('|');
-  document.querySelector('#status').textContent = state === 'Codex: Off' ? 'Codex is not running' : state;
-  document.querySelector('#status').classList.toggle('active', state !== 'Codex: Off');
+  document.querySelector('#status').textContent = UsageView.statusLabel(status.state);
+  document.querySelector('#status').classList.toggle('active', UsageView.isActive(status.state));
   document.querySelector('#plan').textContent = UsageView.planLabel(status.plan);
-  const pro = (status.plan || '').toLowerCase().startsWith('pro');
-  document.querySelector('#usage-5h-option').hidden = pro;
-  document.querySelector('#plan-hint').textContent = pro ? 'Pro · Weekly allowance' : status.plan === 'plus' ? 'Plus · 5-hour and weekly allowances' : 'Limits update automatically from your Codex account.';
+  document.querySelector('#usage-5h-option').hidden = isPro();
+  document.querySelector('#plan-hint').hidden = Boolean(status.plan);
   UsageView.render(document.querySelector('#usage'), status.usage, status.plan);
   updatePreview();
 }
+function isPro() { return (snapshot.plan || '').toLowerCase().startsWith('pro'); }
 function updatePreview() {
   const settings = readForm();
-  const [state, rawModel = '', rawUsage = ''] = snapshot.status_line.split('|');
-  const active = state !== 'Codex: Off';
-  const model = rawModel.split(' - ').filter((part, i) => {
+  const active = UsageView.isActive(snapshot.state);
+  const model = snapshot.model_parts.filter((part, i) => {
     if (!i) return true;
     if (/^(minimal|low|medium|high|extra high|max|ultra)$/i.test(part)) return settings.show_effort;
     if (/^(fast|standard)$/i.test(part)) return settings.show_fast_mode;
@@ -64,13 +63,12 @@ function updatePreview() {
   }).join(' · ');
   const usage = (snapshot.usage || []).filter(entry => {
     const label = entry.label.toLowerCase();
-    return label === 'week' ? settings.show_weekly_usage : label === '5h' && settings.show_primary_usage && !(snapshot.plan || '').startsWith('pro');
+    return label === 'week' ? settings.show_weekly_usage : label === '5h' && settings.show_primary_usage && !isPro();
   }).map(entry => entry.label + ' ' + Math.round(entry.percent) + '%');
-  const credits = rawUsage.split('/').find(part => part.trim().startsWith('credits'));
-  if (settings.show_credits && credits) usage.push(credits.trim());
+  if (settings.show_credits && snapshot.credits) usage.push(snapshot.credits);
   const activity = { playing: 'Playing', watching: 'Watching', listening: 'Listening', competing: 'Competing' }[mode.value];
   document.querySelector('#preview-activity').textContent = active ? activity + ' Codex' : 'Presence paused';
-  document.querySelector('#preview-details').textContent = active ? (state.includes('CLI') ? 'Coding with Codex CLI' : 'Using Codex') : 'Resumes when Codex is running';
+  document.querySelector('#preview-details').textContent = active ? (snapshot.state.includes('CLI') ? 'Coding with Codex CLI' : 'Using Codex') : 'Resumes when Codex is running';
   document.querySelector('#preview-state').textContent = active ? [model, ...usage].filter(Boolean).join(' · ') : '—';
   const buttons = document.querySelector('#preview-buttons');
   buttons.replaceChildren();
@@ -92,7 +90,6 @@ function scheduleSave() {
 mode.addEventListener('change', () => { syncButtons(); scheduleSave(); });
 for (const input of Object.values(toggles)) input.addEventListener('change', scheduleSave);
 for (const input of [...labels, ...urls]) input.addEventListener('input', scheduleSave);
-document.querySelector('#apply').addEventListener('click', save);
 document.querySelector('#clear').addEventListener('click', () => { for (const input of [...labels, ...urls]) input.value = ''; scheduleSave(); });
 document.querySelectorAll('[data-preset]').forEach(button => button.addEventListener('click', () => {
   const slot = labels[0].value.trim() ? 1 : 0;
@@ -102,21 +99,19 @@ async function closeSettings() { await save(); await invoke('close_settings'); }
 document.querySelector('#close').addEventListener('click', closeSettings);
 document.querySelector('#titlebar-close').addEventListener('click', closeSettings);
 document.querySelector('#titlebar-minimize').addEventListener('click', () => appWindow.minimize());
-document.querySelector('#titlebar-maximize').addEventListener('click', () => appWindow.toggleMaximize());
 function applyTheme(theme) {
-  const safe = ['dark', 'system', 'light'].includes(theme) ? theme : 'dark';
-  document.body.dataset.theme = safe === 'system' ? (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark') : safe;
-  localStorage.setItem('codex-rpc-theme', safe);
+  const safe = Theme.apply(['dark', 'system', 'light'].includes(theme) ? theme : Theme.stored());
+  localStorage.setItem(Theme.key, safe);
   document.querySelectorAll('[data-theme-option]').forEach(button => {
     button.classList.toggle('active', button.dataset.themeOption === safe);
     button.setAttribute('aria-pressed', String(button.dataset.themeOption === safe));
   });
 }
 document.querySelectorAll('[data-theme-option]').forEach(button => button.addEventListener('click', () => applyTheme(button.dataset.themeOption)));
-matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => applyTheme(localStorage.getItem('codex-rpc-theme')));
+matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => applyTheme());
 async function refresh() { try { renderStatus(await invoke('load_status')); } catch { message.textContent = 'Status temporarily unavailable'; } }
 (async () => {
-  applyTheme(localStorage.getItem('codex-rpc-theme'));
+  applyTheme();
   try { await invoke('start_daemon'); writeForm(await invoke('load_settings')); await refresh(); }
   catch (error) { message.textContent = String(error); }
   finally { loading = false; }

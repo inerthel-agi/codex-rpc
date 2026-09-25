@@ -1,5 +1,30 @@
+// Shared by the settings window and the tray menu.
+window.Theme = {
+  key: 'codex-rpc-theme',
+  stored() {
+    const value = localStorage.getItem(this.key);
+    return ['dark', 'system', 'light'].includes(value) ? value : 'dark';
+  },
+  apply(choice = this.stored()) {
+    document.body.dataset.theme = choice === 'system'
+      ? (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
+      : choice;
+    return choice;
+  },
+};
+
 // Native progress values work with the app's strict Content Security Policy.
 window.UsageView = {
+  isActive(state) {
+    return Boolean(state) && state !== 'Codex: Off';
+  },
+  statusLabel(state) {
+    return {
+      'Codex: CLI/Desktop': 'Connected to Codex CLI and Desktop',
+      'Codex: CLI': 'Connected to Codex CLI',
+      'Codex: Desktop': 'Connected to Codex Desktop',
+    }[state] || 'Codex is not running';
+  },
   planLabel(plan) {
     const value = (plan || '').toLowerCase();
     if (value.startsWith('pro')) return 'Pro';

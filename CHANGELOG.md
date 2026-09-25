@@ -10,6 +10,7 @@ All notable changes to Codex RPC are documented here.
 - Tray menu: model line uses `·` like the Discord preview, new start-at-login icon, and "Discord: Not connected" replaces "Discord: RPC Disabled".
 - Both windows share one color palette and stylesheet (`tauri-ui/common.css`) and theme helper.
 - `load_status` and `tray_snapshot` now return the same parsed status fields; the unused `daemon_status` command is removed.
+- App identifier is now `io.github.inerthel-agi.codex-rich-presence`. The theme choice resets once after the update. On macOS, a start-at-login agent created by an earlier version is still detected and is replaced on the next toggle.
 
 ## [0.4.0] - 2026-09-23
 

@@ -2261,10 +2261,10 @@ model = "gpt-5.5"
 model_reasoning_effort = "medium"
 service_tier = "standard"
 
-[projects.'d:\users\stealthy\documents\github\codex-rpc']
+[projects.'d:\users\inerthel\documents\github\codex-rpc']
 service_tier = "fast"
 "#;
-        let cfg = parse_codex_config(raw, Some(r"D:\Users\stealthy\Documents\GitHub\codex-rpc"));
+        let cfg = parse_codex_config(raw, Some(r"D:\Users\inerthel\Documents\GitHub\codex-rpc"));
 
         assert_eq!(cfg.model.as_deref(), Some("gpt-5.5"));
         assert_eq!(cfg.effort.as_deref(), Some("medium"));

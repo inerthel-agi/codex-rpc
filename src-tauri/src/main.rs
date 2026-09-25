@@ -21,7 +21,10 @@ const RUN_REGISTRY_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\
 #[cfg(windows)]
 const RUN_REGISTRY_NAME: &str = "CodexRichPresence";
 #[cfg(target_os = "macos")]
-const MACOS_LAUNCH_AGENT_LABEL: &str = "eu.stealthylabs.codex-rich-presence";
+const MACOS_LAUNCH_AGENT_LABEL: &str = "io.github.inerthel-agi.codex-rich-presence";
+/// Label used before 0.4.1; removed on the next startup toggle.
+#[cfg(target_os = "macos")]
+const MACOS_LEGACY_LAUNCH_AGENT_LABEL: &str = "eu.stealthylabs.codex-rich-presence";
 
 #[derive(Default)]
 struct DaemonState {
@@ -481,9 +484,9 @@ fn startup_enabled() -> bool {
 
 #[cfg(target_os = "macos")]
 fn startup_enabled() -> bool {
-    launch_agent_path()
-        .map(|path| path.exists())
-        .unwrap_or(false)
+    [MACOS_LAUNCH_AGENT_LABEL, MACOS_LEGACY_LAUNCH_AGENT_LABEL]
+        .into_iter()
+        .any(|label| launch_agent_path(label).map(|path| path.exists()).unwrap_or(false))
 }
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
@@ -522,7 +525,8 @@ fn set_startup_enabled(enabled: bool) -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 fn set_startup_enabled(enabled: bool) -> Result<(), String> {
-    let path = launch_agent_path()?;
+    remove_launch_agent(&launch_agent_path(MACOS_LEGACY_LAUNCH_AGENT_LABEL)?)?;
+    let path = launch_agent_path(MACOS_LAUNCH_AGENT_LABEL)?;
     if enabled {
         let exe = std::env::current_exe().map_err(|err| err.to_string())?;
         let exe = xml_escape(&exe.to_string_lossy());
@@ -548,11 +552,16 @@ fn set_startup_enabled(enabled: bool) -> Result<(), String> {
         }
         fs::write(path, plist).map_err(|err| err.to_string())
     } else {
-        match fs::remove_file(path) {
-            Ok(()) => Ok(()),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(err.to_string()),
-        }
+        remove_launch_agent(&path)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn remove_launch_agent(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.to_string()),
     }
 }
 
@@ -575,12 +584,12 @@ fn reg_command() -> std::process::Command {
 }
 
 #[cfg(target_os = "macos")]
-fn launch_agent_path() -> Result<PathBuf, String> {
+fn launch_agent_path(label: &str) -> Result<PathBuf, String> {
     let home = std::env::var_os("HOME").ok_or_else(|| "HOME is not set".to_string())?;
     Ok(Path::new(&home)
         .join("Library")
         .join("LaunchAgents")
-        .join(format!("{MACOS_LAUNCH_AGENT_LABEL}.plist")))
+        .join(format!("{label}.plist")))
 }
 
 #[cfg(target_os = "macos")]

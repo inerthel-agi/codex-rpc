@@ -14,7 +14,7 @@
         "label": "main",
         "title": "Codex RPC",
         "width": 700,
-        "height": 620,
+        "height": 680,
         "minWidth": 660,
         "minHeight": 560,
         "resizable": true,

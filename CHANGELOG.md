@@ -6,8 +6,9 @@ All notable changes to Codex RPC are documented here.
 
 ### Changed
 
-- Settings window: readable Codex status ("Connected to Codex Desktop"), plan shown once, usage and detail toggles merged into one "Show on profile" row, profile buttons flagged "Available in Watching mode" outside Watching mode. Removed the redundant Apply and Maximize buttons; default height reduced to 620.
+- Settings window: readable Codex status ("Connected to Codex Desktop"), plan shown once, usage and detail toggles merged into one "Show on profile" row, profile buttons flagged "Available in Watching mode" outside Watching mode. Removed the redundant Apply and Maximize buttons; default height reduced to 680.
 - Tray menu: model line uses `·` like the Discord preview, new start-at-login icon, and "Discord: Not connected" replaces "Discord: RPC Disabled".
+- OpenAI-style visual refresh: neutral monochrome palette, pill-shaped buttons and theme switch, toggle chips for "Show on profile", thinner usage bars, and green kept only for the connected status.
 - Both windows share one color palette and stylesheet (`tauri-ui/common.css`) and theme helper.
 - `load_status` and `tray_snapshot` now return the same parsed status fields; the unused `daemon_status` command is removed.
 - App identifier is now `io.github.inerthel-agi.codex-rich-presence`. The theme choice resets once after the update. On macOS, a start-at-login agent created by an earlier version is still detected and is replaced on the next toggle.

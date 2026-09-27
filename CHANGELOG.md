@@ -2,6 +2,39 @@
 
 All notable changes to Codex RPC are documented here.
 
+## [0.5.0] - 2026-09-27
+
+### Added
+
+- Pause the Discord presence from the tray for 30 minutes, 1 hour or until you resume it.
+- "Hide model name" shows "Coding" instead of the model, effort and speed on Discord.
+- Limits show when they reset ("Resets in 4d 11h") in the tray and the Usage page.
+- Windows notifications when a limit drops to 25% and to 10%, and optionally when it resets (`tauri-plugin-notification`).
+- The tray icon turns grey when Codex is off and gets a dot when the presence is paused or a limit is low; its tooltip shows the remaining limits.
+- Elapsed timer toggle, "Clear when idle" (15, 30 or 60 minutes without Codex activity) and a custom status line with `{model}`, `{effort}`, `{speed}`, `{5h}`, `{week}`, `{credits}` and `{project}`.
+- Usage page with credits, usage today, the last 7 days and a daily chart, stored locally in `usage-history.json`.
+- Daily update check against GitHub releases (can be turned off), "Open Codex", "Open Codex CLI" (opens Command Prompt in your home folder and starts `codex`), "Reconnect" for Discord and "Open data folder".
+- About section in Settings › General with links to the GitHub repo, the author's GitHub profile and the issue tracker.
+- Plan badge names the exact subscription: Pro (Standard), Pro (Plus), Plus, Go, Free, Business, Enterprise or Edu.
+- "Plan" option in Show on profile (off by default) adds the subscription to Discord, e.g. "ChatGPT Pro (Standard)", plus a `{plan}` template value. It is only available when Codex reports a ChatGPT subscription; API-key sign-ins have no plan.
+- Profile buttons page explains that other people only see the buttons with Discord Nitro.
+
+### Changed
+
+- Settings window split into Presence, Usage, Profile buttons and General pages, with a Discord-style live preview and a "Switch to Watching" shortcut for profile buttons.
+- Tray menu redesigned: status pill, large usage figure, low-usage banner and a Discord row; "Start on Windows" moved to Settings › General.
+- The daemon and the Tauri commands share one `RpcSettings` definition, so a saved field can no longer be dropped by one side.
+- The status file carries three more fields (presence state, reset times, session start); older lines still parse.
+
+### Fixed
+
+- Settings are written atomically, so the daemon can no longer read a half-written file and fall back to defaults; tray and settings-window writes no longer overwrite each other.
+- Usage alerts fire once per threshold even when the account and local usage sources disagree by a few points, and those disagreements no longer inflate the usage history.
+- The update check runs off the tray thread, so a slow network no longer freezes the tray icon and alerts.
+- A Discord name containing `|` can no longer shift the status fields.
+- The "Credits" option now adds the remaining credits to Discord (e.g. "12 credits"); before, it only worked through a custom status line. An empty balance is not shown.
+- Without a reported plan, the plan badge reads "API key / unknown" instead of "Subscription".
+
 ## [0.4.1] - 2026-09-25
 
 ### Changed

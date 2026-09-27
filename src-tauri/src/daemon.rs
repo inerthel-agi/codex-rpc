@@ -65,28 +65,64 @@ struct AccountUsageCache {
     usage: Option<CodexUsage>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RpcButton {
-    label: String,
-    url: String,
+/// Pause value meaning "until the user resumes". It is JavaScript's largest safe
+/// integer: `u64::MAX` would come back from the settings window as a float that
+/// no longer deserializes into `u64`, and every save would fail.
+pub(crate) const PAUSE_FOREVER: u64 = 9_007_199_254_740_991;
+static RECONNECT_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Asks the daemon loop to drop and reopen its Discord connection.
+pub(crate) fn request_reconnect() {
+    RECONNECT_REQUESTED.store(true, Ordering::SeqCst);
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct RpcSettings {
-    mode: String,
-    buttons: Vec<RpcButton>,
+pub(crate) struct RpcButton {
+    pub(crate) label: String,
+    pub(crate) url: String,
+}
+
+/// Shared by the daemon and the Tauri commands so a saved field is never dropped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct RpcSettings {
+    pub(crate) mode: String,
+    pub(crate) buttons: Vec<RpcButton>,
     #[serde(default, skip_serializing)]
-    show_usage: Option<bool>,
-    #[serde(default = "default_show_usage")]
-    show_primary_usage: bool,
-    #[serde(default = "default_show_usage")]
-    show_weekly_usage: bool,
-    #[serde(default = "default_show_usage")]
-    show_effort: bool,
-    #[serde(default = "default_show_usage")]
-    show_fast_mode: bool,
-    #[serde(default = "default_show_usage")]
-    show_credits: bool,
+    pub(crate) show_usage: Option<bool>,
+    #[serde(default = "default_true")]
+    pub(crate) show_primary_usage: bool,
+    #[serde(default = "default_true")]
+    pub(crate) show_weekly_usage: bool,
+    #[serde(default = "default_true")]
+    pub(crate) show_effort: bool,
+    #[serde(default = "default_true")]
+    pub(crate) show_fast_mode: bool,
+    #[serde(default = "default_true")]
+    pub(crate) show_credits: bool,
+    /// Shows the ChatGPT subscription (e.g. "ChatGPT Pro (Standard)"). Only a
+    /// ChatGPT sign-in reports a plan; API-key sessions have none to show.
+    #[serde(default)]
+    pub(crate) show_plan: bool,
+    /// Replaces model, effort and speed with "Coding".
+    #[serde(default)]
+    pub(crate) hide_model: bool,
+    #[serde(default = "default_true")]
+    pub(crate) show_elapsed: bool,
+    /// Clears the presence after this many minutes without Codex activity; 0 disables it.
+    #[serde(default)]
+    pub(crate) idle_clear_minutes: u64,
+    /// Optional template for Discord's state line, e.g. `{model} · {week}`.
+    #[serde(default)]
+    pub(crate) custom_state: String,
+    /// Unix ms until which the presence stays hidden; `PAUSE_FOREVER` waits for a resume.
+    #[serde(default)]
+    pub(crate) paused_until_ms: u64,
+    #[serde(default = "default_true")]
+    pub(crate) notify_low: bool,
+    #[serde(default)]
+    pub(crate) notify_reset: bool,
+    #[serde(default = "default_true")]
+    pub(crate) check_updates: bool,
 }
 
 impl Default for RpcSettings {
@@ -109,11 +145,26 @@ impl Default for RpcSettings {
             show_effort: true,
             show_fast_mode: true,
             show_credits: true,
+            show_plan: false,
+            hide_model: false,
+            show_elapsed: true,
+            idle_clear_minutes: 0,
+            custom_state: String::new(),
+            paused_until_ms: 0,
+            notify_low: true,
+            notify_reset: false,
+            check_updates: true,
         }
     }
 }
 
-fn default_show_usage() -> bool {
+impl RpcSettings {
+    pub(crate) fn is_paused(&self, now: u64) -> bool {
+        now < self.paused_until_ms
+    }
+}
+
+fn default_true() -> bool {
     true
 }
 
@@ -164,6 +215,8 @@ struct CodexConfig {
 struct CodexSession {
     cwd: String,
     repo_name: String,
+    /// Last write to the session's rollout file, used for the idle timeout.
+    last_activity_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -239,6 +292,15 @@ pub fn run(stop: Arc<AtomicBool>, settings_path: Option<PathBuf>, status_path: O
             last_key.clear();
         }
 
+        if RECONNECT_REQUESTED.swap(false, Ordering::SeqCst) {
+            if let Some(client) = ipc.as_mut() {
+                let _ = client.clear_activity();
+            }
+            ipc = None;
+            next_ipc_attempt_at = 0;
+            last_key.clear();
+        }
+
         if ipc.is_none() && now_ms() >= next_ipc_attempt_at {
             ipc = DiscordIpc::connect(&client_id).ok();
             if ipc.is_some() {
@@ -259,12 +321,14 @@ pub fn run(stop: Arc<AtomicBool>, settings_path: Option<PathBuf>, status_path: O
         }
 
         let mut display_result = result.clone();
+        let presence = presence_state(&display_result, &settings, now);
         // Status line keeps unfiltered usage: the show_* flags only gate what is
         // published to Discord, not what the tray popup displays locally.
         let status_line = format_status_line(
             &display_result,
             &settings,
             ipc.as_ref().and_then(|client| client.username.as_deref()),
+            presence,
         );
         filter_usage(&mut display_result, &settings);
         if last_status_line.as_deref() != Some(status_line.as_str()) {
@@ -272,11 +336,17 @@ pub fn run(stop: Arc<AtomicBool>, settings_path: Option<PathBuf>, status_path: O
             last_status_line = Some(status_line);
         }
 
-        let key = presence_key(&display_result, &settings);
+        let key = match presence {
+            Presence::Live => presence_key(&display_result, &settings),
+            hidden => hidden.as_str().to_string(),
+        };
         let should_refresh_rpc = now.saturating_sub(last_rpc_refresh_at) >= RPC_REFRESH_INTERVAL_MS;
         if key != last_key || should_refresh_rpc {
             if let Some(client) = ipc.as_mut() {
-                let sent = match build_activity(&display_result, &settings) {
+                let activity = (presence == Presence::Live)
+                    .then(|| build_activity(&display_result, &settings))
+                    .flatten();
+                let sent = match activity {
                     Some(activity) => client.set_activity(activity),
                     None => client.clear_activity(),
                 };
@@ -759,7 +829,7 @@ fn build_activity(result: &DetectionResult, settings: &RpcSettings) -> Option<Va
         },
     });
 
-    if let Some(started_at_ms) = result.started_at_ms {
+    if let Some(started_at_ms) = result.started_at_ms.filter(|_| settings.show_elapsed) {
         activity["timestamps"] = json!({ "start": started_at_ms / 1000 });
     }
     if mode == "watching" && !settings.buttons.is_empty() {
@@ -793,38 +863,37 @@ fn build_details(result: &DetectionResult, mode: &str) -> String {
     base.to_string()
 }
 
-fn build_state_line(result: &DetectionResult, settings: &RpcSettings) -> String {
-    let model = result
-        .codex
-        .as_ref()
+/// Model, effort and speed after the privacy and visibility settings.
+fn model_fields(
+    result: &DetectionResult,
+    settings: &RpcSettings,
+) -> (Option<String>, Option<String>, Option<String>) {
+    if settings.hide_model {
+        return (Some("Coding".into()), None, None);
+    }
+    let codex = result.codex.as_ref();
+    let model = codex
         .and_then(|cfg| cfg.model.as_deref())
         .and_then(format_model);
-    let effort = result
-        .codex
-        .as_ref()
+    let effort = codex
         .and_then(|cfg| cfg.effort.as_deref())
         .and_then(format_effort);
     let speed = settings
         .show_fast_mode
-        .then(|| {
-            format_speed(
-                result
-                    .codex
-                    .as_ref()
-                    .and_then(|cfg| cfg.service_tier.as_deref()),
-            )
-        })
+        .then(|| format_speed(codex.and_then(|cfg| cfg.service_tier.as_deref())))
         .flatten();
-    let mut parts = Vec::new();
-    if let Some(model) = model {
-        parts.push(model);
+    (model, effort, speed)
+}
+
+fn build_state_line(result: &DetectionResult, settings: &RpcSettings) -> String {
+    if let Some(custom) = render_state_template(result, settings) {
+        return custom;
     }
-    if let Some(effort) = effort {
-        parts.push(effort);
-    }
-    if let Some(speed) = speed {
-        parts.push(speed);
-    }
+    let (model, effort, speed) = model_fields(result, settings);
+    let parts = [model, effort, speed]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
     let base = if parts.is_empty() {
         match result.state {
             PresenceState::Cli => "Terminal session active".into(),
@@ -850,6 +919,108 @@ fn build_state_line(result: &DetectionResult, settings: &RpcSettings) -> String 
         }
     }
     truncate(base, 128)
+}
+
+/// Fills `settings.custom_state`. Tokens without a value are dropped with their
+/// separator, so `{model} · {credits}` never ends with a dangling `·`.
+fn render_state_template(result: &DetectionResult, settings: &RpcSettings) -> Option<String> {
+    let template = settings.custom_state.trim();
+    if template.is_empty() {
+        return None;
+    }
+    let (model, effort, speed) = model_fields(result, settings);
+    let usage = result.usage.as_ref();
+    let percent =
+        |limit: Option<&LimitSnapshot>| limit.map(|l| format!("{}%", remaining_percent(l)));
+    let values = [
+        ("{model}", model),
+        ("{effort}", effort),
+        ("{speed}", speed),
+        ("{5h}", percent(usage.and_then(|u| u.primary.as_ref()))),
+        ("{week}", percent(usage.and_then(|u| u.secondary.as_ref()))),
+        (
+            "{credits}",
+            usage
+                .and_then(|u| u.credits_remaining)
+                .map(|c| c.round().to_string()),
+        ),
+        (
+            "{plan}",
+            usage.and_then(|u| u.plan_type.as_deref()).map(plan_label),
+        ),
+        (
+            "{project}",
+            result
+                .session
+                .as_ref()
+                .filter(|_| !settings.hide_model)
+                .and_then(|session| sanitize_field(Some(&session.repo_name), 32)),
+        ),
+    ];
+    let mut text = template.to_string();
+    for (token, value) in values {
+        text = text.replace(token, value.as_deref().unwrap_or(""));
+    }
+    let rendered = sanitize_field(Some(&drop_dangling_separators(&text)), 128)?;
+    (rendered.chars().count() >= 2).then_some(rendered)
+}
+
+fn drop_dangling_separators(text: &str) -> String {
+    let is_separator = |word: &str| {
+        word.chars()
+            .all(|ch| matches!(ch, '·' | '-' | '|' | '/' | '•' | '—'))
+    };
+    let mut words: Vec<&str> = Vec::new();
+    for word in text.split_whitespace() {
+        if is_separator(word) && words.last().is_none_or(|last| is_separator(last)) {
+            continue;
+        }
+        words.push(word);
+    }
+    while words.last().is_some_and(|last| is_separator(last)) {
+        words.pop();
+    }
+    words.join(" ")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Presence {
+    Off,
+    Paused,
+    Idle,
+    Live,
+}
+
+impl Presence {
+    fn as_str(self) -> &'static str {
+        match self {
+            Presence::Off => "off",
+            Presence::Paused => "paused",
+            Presence::Idle => "idle",
+            Presence::Live => "live",
+        }
+    }
+}
+
+fn presence_state(result: &DetectionResult, settings: &RpcSettings, now: u64) -> Presence {
+    if result.state == PresenceState::Idle {
+        return Presence::Off;
+    }
+    if settings.is_paused(now) {
+        return Presence::Paused;
+    }
+    if settings.idle_clear_minutes > 0 {
+        let last_activity = result
+            .session
+            .as_ref()
+            .map(|session| session.last_activity_ms)
+            .max(result.started_at_ms)
+            .unwrap_or(0);
+        if now.saturating_sub(last_activity) >= settings.idle_clear_minutes.saturating_mul(60_000) {
+            return Presence::Idle;
+        }
+    }
+    Presence::Live
 }
 
 fn build_large_image_text(result: &DetectionResult) -> String {
@@ -878,14 +1049,50 @@ fn compact_usage_parts(result: &DetectionResult) -> Vec<String> {
                 remaining_percent(secondary)
             ));
         }
+        // `filter_usage` clears credits and the plan unless their options are ticked.
+        // Credits default to on, so an empty balance stays off the profile.
+        if let Some(credits) = usage.credits_remaining.filter(|c| c.round() > 0.0) {
+            parts.push(format!("{} credits", credits.round()));
+        }
+        if let Some(plan) = usage.plan_type.as_deref() {
+            parts.push(format!("ChatGPT {}", plan_label(plan)));
+        }
     }
     parts
+}
+
+/// Display name for Codex's `planType`; mirrors `UsageView.planLabel` in usage.js.
+/// `prolite` was confirmed on a Pro Standard account, so plain `pro` is Pro Plus.
+fn plan_label(plan: &str) -> String {
+    let value = plan.trim().to_ascii_lowercase();
+    let known = match value.as_str() {
+        "prolite" => "Pro (Standard)",
+        "pro" => "Pro (Plus)",
+        "plus" => "Plus",
+        "go" => "Go",
+        "free" => "Free",
+        "team" | "business" => "Business",
+        "enterprise" => "Enterprise",
+        "edu" => "Edu",
+        _ if value.starts_with("pro") => "Pro",
+        _ => "",
+    };
+    if !known.is_empty() {
+        return known.into();
+    }
+    let mut chars = value.chars();
+    let label = match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    };
+    sanitize_field(Some(&label), 24).unwrap_or_default()
 }
 
 fn format_status_line(
     result: &DetectionResult,
     settings: &RpcSettings,
     discord_user: Option<&str>,
+    presence: Presence,
 ) -> String {
     let state = match result.state {
         PresenceState::Both => "Codex: CLI/Desktop",
@@ -929,7 +1136,31 @@ fn format_status_line(
         .as_ref()
         .and_then(|usage| usage.plan_type.as_deref())
         .unwrap_or("");
-    format!("{state}|{model_line}|{usage_line}|{discord}|{plan}")
+    let resets = format_resets(result.usage.as_ref());
+    let since = result
+        .started_at_ms
+        .map(|ms| ms.to_string())
+        .unwrap_or_default();
+    format!(
+        "{state}|{model_line}|{usage_line}|{discord}|{plan}|{}|{resets}|{since}",
+        presence.as_str()
+    )
+}
+
+/// `5h=<unix ms>,week=<unix ms>` for the limits that report a reset time.
+fn format_resets(usage: Option<&CodexUsage>) -> String {
+    let Some(usage) = usage else {
+        return String::new();
+    };
+    [(&usage.primary, "5h"), (&usage.secondary, "week")]
+        .into_iter()
+        .filter_map(|(limit, fallback)| {
+            let limit = limit.as_ref()?;
+            let reset = limit.resets_at_ms.filter(|reset| *reset > now_ms())?;
+            Some(format!("{}={reset}", usage_label(limit, fallback)))
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn format_usage(usage: Option<&CodexUsage>) -> Option<String> {
@@ -964,14 +1195,27 @@ fn read_rpc_settings(path: &Path) -> RpcSettings {
         Ok(raw) => raw,
         Err(_) => return RpcSettings::default(),
     };
-    let mut settings =
-        serde_json::from_str::<RpcSettings>(raw.trim_start_matches('\u{feff}')).unwrap_or_default();
+    normalize_settings(
+        serde_json::from_str::<RpcSettings>(raw.trim_start_matches('\u{feff}')).unwrap_or_default(),
+    )
+}
+
+pub(crate) fn normalize_settings(mut settings: RpcSettings) -> RpcSettings {
     if settings.show_usage == Some(false) {
         settings.show_primary_usage = false;
         settings.show_weekly_usage = false;
+        settings.show_credits = false;
     }
     settings.show_usage = None;
     settings.mode = normalize_mode(&settings.mode);
+    settings.idle_clear_minutes = settings.idle_clear_minutes.min(24 * 60);
+    settings.paused_until_ms = settings.paused_until_ms.min(PAUSE_FOREVER);
+    settings.custom_state = settings
+        .custom_state
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(128)
+        .collect();
     settings.buttons = settings
         .buttons
         .into_iter()
@@ -995,6 +1239,9 @@ fn filter_usage(result: &mut DetectionResult, settings: &RpcSettings) {
         }
         if !settings.show_credits {
             usage.credits_remaining = None;
+        }
+        if !settings.show_plan {
+            usage.plan_type = None;
         }
     }
     if !settings.show_effort {
@@ -1174,6 +1421,7 @@ fn read_codex_session() -> Option<CodexSession> {
     Some(CodexSession {
         cwd: strip_windows_long_prefix(cwd).to_string(),
         repo_name: basename_safe(strip_windows_long_prefix(cwd)),
+        last_activity_ms: latest.1,
     })
 }
 
@@ -1910,7 +2158,7 @@ fn clean_url(value: &str) -> Option<String> {
 }
 
 fn clean_status_line(line: &str) -> String {
-    line.replace(['\r', '\n'], " ").chars().take(256).collect()
+    line.replace(['\r', '\n'], " ").chars().take(512).collect()
 }
 
 fn write_status(path: &Path, line: &str) {
@@ -2021,7 +2269,8 @@ fn sanitize_field(raw: Option<&str>, max_len: usize) -> Option<String> {
 }
 
 fn sanitize_discord_user(raw: &str) -> Option<String> {
-    sanitize_field(Some(raw), 32)
+    // `|` separates the status-file fields.
+    sanitize_field(Some(&raw.replace('|', "/")), 32)
 }
 
 fn truncate(value: String, max_len: usize) -> String {
@@ -2055,9 +2304,15 @@ fn small_image_text(state: PresenceState) -> &'static str {
 }
 
 fn presence_key(result: &DetectionResult, settings: &RpcSettings) -> String {
+    // Rollout writes happen every few seconds while Codex streams; they must not
+    // trigger a Discord update on their own.
+    let mut stable = result.clone();
+    if let Some(session) = stable.session.as_mut() {
+        session.last_activity_ms = 0;
+    }
     format!(
         "{:?}|{}",
-        result,
+        stable,
         serde_json::to_string(settings).unwrap_or_default()
     )
 }
@@ -2213,7 +2468,8 @@ mod tests {
                 show_weekly_usage: false,
                 ..RpcSettings::default()
             };
-            assert!(format_status_line(&result, &settings, None).contains("week 89% left"));
+            assert!(format_status_line(&result, &settings, None, Presence::Live)
+                .contains("week 89% left"));
             filter_usage(&mut result, &settings);
             assert!(result.usage.as_ref().unwrap().secondary.is_none());
             assert!(build_activity(&result, &settings).is_none());
@@ -2250,7 +2506,7 @@ mod tests {
             build_state_line(&result, &settings),
             "GPT-5.5 - High - Fast"
         );
-        assert!(format_status_line(&result, &settings, None)
+        assert!(format_status_line(&result, &settings, None, Presence::Live)
             .starts_with("Codex: CLI|GPT-5.5 - High - Fast|"));
     }
 
@@ -2293,7 +2549,7 @@ service_tier = "fast"
             build_state_line(&result, &settings),
             "GPT-5.5 - High - Standard"
         );
-        assert!(format_status_line(&result, &settings, None)
+        assert!(format_status_line(&result, &settings, None, Presence::Live)
             .starts_with("Codex: Desktop|GPT-5.5 - High - Standard|"));
     }
 
@@ -2346,5 +2602,226 @@ service_tier = "fast"
     fn format_effort_maps_new_levels() {
         assert_eq!(format_effort("ultra").as_deref(), Some("Ultra"));
         assert_eq!(format_effort("max").as_deref(), Some("Max"));
+    }
+
+    fn active_result() -> DetectionResult {
+        DetectionResult {
+            state: PresenceState::App,
+            started_at_ms: Some(1_000),
+            codex: Some(CodexConfig {
+                model: Some("gpt-6-astra".into()),
+                effort: Some("xhigh".into()),
+                service_tier: Some("fast".into()),
+            }),
+            session: Some(CodexSession {
+                cwd: "C:/code/codex-rpc".into(),
+                repo_name: "codex-rpc".into(),
+                last_activity_ms: 1_000,
+            }),
+            usage: Some(CodexUsage {
+                limit_id: Some("codex".into()),
+                plan_type: None,
+                primary: None,
+                secondary: Some(LimitSnapshot {
+                    used_percent: 3.0,
+                    window_minutes: Some(10080),
+                    resets_at_ms: Some(u64::MAX / 2),
+                    observed_at_ms: 0,
+                }),
+                credits_remaining: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn hide_model_replaces_model_effort_and_speed() {
+        let settings = RpcSettings {
+            hide_model: true,
+            ..RpcSettings::default()
+        };
+        assert_eq!(
+            build_state_line(&active_result(), &settings),
+            "Coding - week 97%"
+        );
+    }
+
+    #[test]
+    fn custom_template_fills_tokens_and_drops_empty_ones() {
+        let settings = RpcSettings {
+            custom_state: "{model} · {effort} · {credits} · {week} left".into(),
+            ..RpcSettings::default()
+        };
+        assert_eq!(
+            build_state_line(&active_result(), &settings),
+            "GPT-6-Astra · Extra High · 97% left"
+        );
+        let blank = RpcSettings {
+            custom_state: "{credits}".into(),
+            ..RpcSettings::default()
+        };
+        assert_eq!(
+            build_state_line(&active_result(), &blank),
+            "GPT-6-Astra - Extra High - Fast - week 97%"
+        );
+    }
+
+    #[test]
+    fn elapsed_timer_can_be_disabled() {
+        let result = active_result();
+        let shown = build_activity(&result, &RpcSettings::default()).unwrap();
+        assert!(shown.get("timestamps").is_some());
+        let settings = RpcSettings {
+            show_elapsed: false,
+            ..RpcSettings::default()
+        };
+        assert!(build_activity(&result, &settings)
+            .unwrap()
+            .get("timestamps")
+            .is_none());
+    }
+
+    #[test]
+    fn presence_honours_pause_and_idle_timeout() {
+        let result = active_result();
+        let now = 1_000 + 20 * 60_000;
+        assert_eq!(
+            presence_state(&result, &RpcSettings::default(), now),
+            Presence::Live
+        );
+        let paused = RpcSettings {
+            paused_until_ms: PAUSE_FOREVER,
+            ..RpcSettings::default()
+        };
+        assert_eq!(presence_state(&result, &paused, now), Presence::Paused);
+        let expired = RpcSettings {
+            paused_until_ms: now - 1,
+            ..RpcSettings::default()
+        };
+        assert_eq!(presence_state(&result, &expired, now), Presence::Live);
+        let idle = RpcSettings {
+            idle_clear_minutes: 15,
+            ..RpcSettings::default()
+        };
+        assert_eq!(presence_state(&result, &idle, now), Presence::Idle);
+        let patient = RpcSettings {
+            idle_clear_minutes: 30,
+            ..RpcSettings::default()
+        };
+        assert_eq!(presence_state(&result, &patient, now), Presence::Live);
+        let off = DetectionResult::default();
+        assert_eq!(presence_state(&off, &paused, now), Presence::Off);
+    }
+
+    #[test]
+    fn status_line_carries_presence_resets_and_start() {
+        let line = format_status_line(
+            &active_result(),
+            &RpcSettings::default(),
+            Some("me"),
+            Presence::Paused,
+        );
+        let fields: Vec<&str> = line.split('|').collect();
+        assert_eq!(fields[5], "paused");
+        assert_eq!(fields[6], format!("week={}", u64::MAX / 2));
+        assert_eq!(fields[7], "1000");
+    }
+
+    #[test]
+    fn rollout_activity_does_not_change_the_presence_key() {
+        let settings = RpcSettings::default();
+        let mut result = active_result();
+        let before = presence_key(&result, &settings);
+        result.session.as_mut().unwrap().last_activity_ms = 99_999;
+        assert_eq!(presence_key(&result, &settings), before);
+    }
+
+    #[test]
+    fn plan_is_shown_only_when_ticked() {
+        let with_plan = || {
+            let mut result = active_result();
+            result.usage.as_mut().unwrap().plan_type = Some("prolite".into());
+            result
+        };
+        let mut hidden = with_plan();
+        filter_usage(&mut hidden, &RpcSettings::default());
+        assert_eq!(
+            build_state_line(&hidden, &RpcSettings::default()),
+            "GPT-6-Astra - Extra High - Fast - week 97%"
+        );
+        let settings = RpcSettings {
+            show_plan: true,
+            ..RpcSettings::default()
+        };
+        let mut shown = with_plan();
+        filter_usage(&mut shown, &settings);
+        assert_eq!(
+            build_state_line(&shown, &settings),
+            "GPT-6-Astra - Extra High - Fast - week 97% - ChatGPT Pro (Standard)"
+        );
+        let template = RpcSettings {
+            custom_state: "{model} on {plan}".into(),
+            ..settings
+        };
+        assert_eq!(
+            build_state_line(&shown, &template),
+            "GPT-6-Astra on Pro (Standard)"
+        );
+        assert_eq!(plan_label("pro"), "Pro (Plus)");
+        assert_eq!(plan_label("team"), "Business");
+        assert_eq!(plan_label("new_tier"), "New_tier");
+    }
+
+    #[test]
+    fn credits_follow_their_option_and_hide_an_empty_balance() {
+        let with_credits = |credits| {
+            let mut result = active_result();
+            result.usage.as_mut().unwrap().credits_remaining = Some(credits);
+            result
+        };
+        let defaults = RpcSettings::default();
+        let mut shown = with_credits(12.0);
+        filter_usage(&mut shown, &defaults);
+        assert_eq!(
+            build_state_line(&shown, &defaults),
+            "GPT-6-Astra - Extra High - Fast - week 97% - 12 credits"
+        );
+        let mut empty = with_credits(0.0);
+        filter_usage(&mut empty, &defaults);
+        assert!(!build_state_line(&empty, &defaults).contains("credits"));
+        let off = RpcSettings {
+            show_credits: false,
+            ..RpcSettings::default()
+        };
+        let mut hidden = with_credits(12.0);
+        filter_usage(&mut hidden, &off);
+        assert!(!build_state_line(&hidden, &off).contains("credits"));
+    }
+
+    #[test]
+    fn endless_pause_survives_a_javascript_round_trip() {
+        // JSON.stringify(Number(u64::MAX)) is not a valid u64; the old value broke every save.
+        let js_u64_max =
+            r#"{"mode":"playing","buttons":[],"paused_until_ms":18446744073709552000}"#;
+        assert!(serde_json::from_str::<RpcSettings>(js_u64_max).is_err());
+        let js_forever = format!(
+            r#"{{"mode":"playing","buttons":[],"paused_until_ms":{}}}"#,
+            PAUSE_FOREVER as f64
+        );
+        let settings: RpcSettings = serde_json::from_str(&js_forever).unwrap();
+        assert!(settings.is_paused(now_ms()));
+        let clamped = normalize_settings(RpcSettings {
+            paused_until_ms: u64::MAX,
+            ..RpcSettings::default()
+        });
+        assert_eq!(clamped.paused_until_ms, PAUSE_FOREVER);
+    }
+
+    #[test]
+    fn older_settings_files_get_defaults_for_new_fields() {
+        let settings: RpcSettings =
+            serde_json::from_str(r#"{"mode":"watching","buttons":[]}"#).unwrap();
+        assert!(settings.show_elapsed && settings.notify_low && settings.check_updates);
+        assert!(!settings.hide_model && !settings.notify_reset);
+        assert_eq!(settings.paused_until_ms, 0);
     }
 }

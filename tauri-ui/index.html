@@ -10,58 +10,231 @@
   <script defer src="./main.js"></script>
 </head>
 <body>
-    <div class="titlebar" data-tauri-drag-region>
-      <img class="titlebar-logo" src="./codex_logo.png" alt="" />
-      <div class="titlebar-controls">
-        <button type="button" class="titlebar-button" id="titlebar-minimize" aria-label="Minimize" title="Minimize">
-          <svg width="11" height="11" viewBox="0 0 11 11" aria-hidden="true"><line x1="1" y1="5.5" x2="10" y2="5.5" stroke="currentColor" stroke-width="1" /></svg>
-        </button>
-        <button type="button" class="titlebar-button close" id="titlebar-close" aria-label="Close" title="Close">
-          <svg width="11" height="11" viewBox="0 0 11 11" aria-hidden="true"><line x1="1.5" y1="1.5" x2="9.5" y2="9.5" stroke="currentColor" stroke-width="1" /><line x1="9.5" y1="1.5" x2="1.5" y2="9.5" stroke="currentColor" stroke-width="1" /></svg>
-        </button>
-      </div>
+  <div class="titlebar" data-tauri-drag-region>
+    <img class="titlebar-logo" src="./codex_logo.png" alt="" />
+    <div class="titlebar-controls">
+      <button type="button" class="titlebar-button" id="titlebar-minimize" aria-label="Minimize" title="Minimize">
+        <svg width="11" height="11" viewBox="0 0 11 11" aria-hidden="true"><line x1="1" y1="5.5" x2="10" y2="5.5" stroke="currentColor" stroke-width="1" /></svg>
+      </button>
+      <button type="button" class="titlebar-button close" id="titlebar-close" aria-label="Close" title="Close">
+        <svg width="11" height="11" viewBox="0 0 11 11" aria-hidden="true"><line x1="1.5" y1="1.5" x2="9.5" y2="9.5" stroke="currentColor" stroke-width="1" /><line x1="9.5" y1="1.5" x2="1.5" y2="9.5" stroke="currentColor" stroke-width="1" /></svg>
+      </button>
     </div>
-  <main class="shell">
-    <header class="topbar">
-      <div><h1>Codex RPC</h1><p id="status" class="status">Waiting for Codex</p></div>
-      <div class="theme-switch" aria-label="Theme">
-        <button type="button" data-theme-option="dark">Dark</button>
-        <button type="button" data-theme-option="system">System</button>
-        <button type="button" data-theme-option="light">Light</button>
+  </div>
+
+  <div class="layout">
+    <nav class="side" aria-label="Sections">
+      <div class="brand">
+        <img src="./codex_logo.png" alt="" />
+        <div><strong>Codex RPC</strong><span id="side-status" class="side-status">Offline</span></div>
       </div>
-    </header>
-    <section class="card usage-panel" aria-labelledby="usage-title">
-      <div class="section-heading"><h2 id="usage-title">Usage</h2><span id="plan" class="plan">Subscription</span></div>
-      <div id="usage" class="usage"><p class="usage-empty">Waiting for Codex usage…</p></div>
-      <p class="note" id="plan-hint">Limits update automatically from your Codex account.</p>
-    </section>
-    <section class="settings-section" aria-labelledby="presence-title">
-      <h2 id="presence-title">Discord presence</h2>
-      <div class="setting-row">
-        <label for="mode">Activity</label>
-        <select id="mode"><option value="playing">Playing</option><option value="watching">Watching</option><option value="listening">Listening</option><option value="competing">Competing</option></select>
-      </div>
-      <div class="setting-row"><span>Show on profile</span><div class="checks">
-        <label id="usage-5h-option"><input type="checkbox" id="usage-5h-toggle" />5 hours</label>
-        <label><input type="checkbox" id="usage-week-toggle" />Week</label>
-        <label><input type="checkbox" id="effort-toggle" />Effort</label>
-        <label><input type="checkbox" id="fast-mode-toggle" />Fast mode</label>
-        <label><input type="checkbox" id="credits-toggle" />Credits</label>
-      </div></div>
-      <div class="card rpc-preview" aria-label="Discord preview">
-        <img class="preview-icon" src="./codex_logo.png" alt="" />
-        <div class="preview-copy"><strong id="preview-activity">Playing Codex</strong><span id="preview-details">No Codex activity</span><span id="preview-state">—</span><div id="preview-buttons" class="preview-buttons"></div></div>
-        <span class="preview-tag">Preview</span>
-      </div>
-    </section>
-    <details class="links-section">
-      <summary>Profile buttons <span id="links-hint">Optional</span></summary>
-      <p class="note">Links are sent to Discord in Watching mode.</p>
-      <div class="link-row"><label for="label0">Button 1</label><input id="label0" maxlength="32" aria-label="Button 1 label" placeholder="Label" /><input id="url0" type="url" aria-label="Button 1 URL" placeholder="https://…" /></div>
-      <div class="link-row"><label for="label1">Button 2</label><input id="label1" maxlength="32" aria-label="Button 2 label" placeholder="Label" /><input id="url1" type="url" aria-label="Button 2 URL" placeholder="https://…" /></div>
-      <div class="presets"><button type="button" data-preset="codex">Open Codex</button><button type="button" data-preset="usage">Usage</button><button type="button" data-preset="repo">GitHub repo</button><button type="button" id="clear" class="ghost">Clear</button></div>
-    </details>
-  </main>
-  <footer class="actions"><span id="message" role="status">Changes save automatically</span><button type="button" id="close" class="primary">Close</button></footer>
+      <button type="button" class="nav" data-tab="presence" aria-current="page">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0" /></svg>Presence
+      </button>
+      <button type="button" class="nav" data-tab="usage">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v18h18" /><path d="M7 15l4-4 3 3 5-6" /></svg>Usage
+      </button>
+      <button type="button" class="nav" data-tab="buttons">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7" /><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7" /></svg>Profile buttons
+      </button>
+      <button type="button" class="nav" data-tab="general">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="3" /><circle cx="12" cy="12" r="9" /></svg>General
+      </button>
+      <div class="spacer"></div>
+      <div class="version"><span id="version">Codex RPC</span><button type="button" class="update-link" id="update-link" hidden></button></div>
+    </nav>
+
+    <main class="content">
+      <!-- Presence -->
+      <section data-panel="presence" aria-labelledby="presence-title">
+        <h1 id="presence-title">Presence</h1>
+        <p class="sub">What your Discord profile shows while you use Codex.</p>
+        <div class="dc" aria-label="Discord preview">
+          <div class="dc-head"><span id="dc-activity">Playing</span><span>Live preview</span></div>
+          <div class="dc-body">
+            <div class="dc-art"><img src="./codex_logo.png" alt="" /><span class="dc-badge"></span></div>
+            <div class="dc-copy">
+              <strong>Codex</strong>
+              <span id="dc-details">No Codex activity</span>
+              <span id="dc-state">—</span>
+              <span id="dc-time" class="dc-time" hidden></span>
+            </div>
+          </div>
+          <div class="dc-buttons" id="dc-buttons" hidden></div>
+          <p class="dc-note" id="dc-note" hidden></p>
+        </div>
+
+        <h2 class="group-title">Activity type</h2>
+        <div class="modes" role="radiogroup" aria-label="Activity type" id="modes">
+          <button type="button" role="radio" data-mode="playing">Playing</button>
+          <button type="button" role="radio" data-mode="watching">Watching</button>
+          <button type="button" role="radio" data-mode="listening">Listening</button>
+          <button type="button" role="radio" data-mode="competing">Competing</button>
+        </div>
+
+        <h2 class="group-title">Details</h2>
+        <div class="group">
+          <div class="row stack">
+            <div class="row-text"><span>Show on profile</span><small>What appears after the model on Discord.</small></div>
+            <div class="chips left" id="chips">
+              <button type="button" class="chip" data-key="show_primary_usage" id="chip-5h">5 hours</button>
+              <button type="button" class="chip" data-key="show_weekly_usage">Week</button>
+              <button type="button" class="chip" data-key="show_effort">Effort</button>
+              <button type="button" class="chip" data-key="show_fast_mode">Fast mode</button>
+              <button type="button" class="chip" data-key="show_credits">Credits</button>
+              <button type="button" class="chip" data-key="show_plan" id="chip-plan">Plan</button>
+            </div>
+            <small class="chip-hint" id="plan-hint" hidden>Plan is available when Codex reports a ChatGPT subscription. API-key sign-ins have no plan to show.</small>
+          </div>
+          <div class="row">
+            <div class="row-text"><span id="lbl-hide">Hide model name</span><small>Shows “Coding” instead of the model and effort.</small></div>
+            <button type="button" class="switch" role="switch" data-key="hide_model" aria-labelledby="lbl-hide"></button>
+          </div>
+          <div class="row">
+            <div class="row-text"><span id="lbl-elapsed">Elapsed timer</span><small>Show how long the session has been running.</small></div>
+            <button type="button" class="switch" role="switch" data-key="show_elapsed" aria-labelledby="lbl-elapsed"></button>
+          </div>
+          <div class="row">
+            <div class="row-text"><label for="idle">Clear when idle</label><small>Remove the presence when Codex has done nothing for a while.</small></div>
+            <select id="idle">
+              <option value="0">Never</option>
+              <option value="15">After 15 min</option>
+              <option value="30">After 30 min</option>
+              <option value="60">After 1 h</option>
+            </select>
+          </div>
+        </div>
+
+        <h2 class="group-title">Custom status line <span class="muted">(optional)</span></h2>
+        <div class="group">
+          <div class="row stack">
+            <input id="template" class="mono" maxlength="128" placeholder="Automatic — e.g. {model} · {week} left" aria-label="Custom status line" />
+            <div class="tokens" id="tokens" aria-label="Insert a value">
+              <button type="button">{model}</button><button type="button">{effort}</button><button type="button">{speed}</button><button type="button">{5h}</button><button type="button">{week}</button><button type="button">{credits}</button><button type="button">{plan}</button><button type="button">{project}</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Usage -->
+      <section data-panel="usage" aria-labelledby="usage-title" hidden>
+        <h1 id="usage-title">Usage</h1>
+        <p class="sub">Your Codex limits. Updated automatically.</p>
+        <div class="group usage-card" id="usage"></div>
+        <div class="stats">
+          <div class="group stat"><span>Credits</span><b id="stat-credits">—</b></div>
+          <div class="group stat"><span>Used today</span><b id="stat-today">—</b></div>
+          <div class="group stat"><span>Last 7 days</span><b id="stat-week">—</b></div>
+        </div>
+        <h2 class="group-title">Weekly limit used per day</h2>
+        <div class="group chart-card">
+          <svg id="chart" viewBox="0 0 280 72" preserveAspectRatio="none" role="img" aria-label="Weekly limit used per day"></svg>
+          <div class="chart-days" id="chart-days"></div>
+          <p class="note" id="chart-note">History starts when Codex RPC first sees your usage.</p>
+        </div>
+        <h2 class="group-title">Alerts</h2>
+        <div class="group">
+          <div class="row">
+            <div class="row-text"><span id="lbl-low">Notify when low</span><small>A notification at 25% and at 10% left.</small></div>
+            <button type="button" class="switch" role="switch" data-key="notify_low" aria-labelledby="lbl-low"></button>
+          </div>
+          <div class="row">
+            <div class="row-text"><span id="lbl-reset">Notify on reset</span><small>Tells you when a limit is back to 100%.</small></div>
+            <button type="button" class="switch" role="switch" data-key="notify_reset" aria-labelledby="lbl-reset"></button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Profile buttons -->
+      <section data-panel="buttons" aria-labelledby="buttons-title" hidden>
+        <h1 id="buttons-title">Profile buttons</h1>
+        <p class="sub">Up to two links under your presence.</p>
+        <div class="group lock" id="lock">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></svg>
+          <span>Discord only shows buttons in <strong>Watching</strong> mode.</span>
+          <button type="button" id="to-watching">Switch to Watching</button>
+        </div>
+        <div class="group lock nitro">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><line x1="12" y1="11" x2="12" y2="16" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
+          <span>Requires <strong>Discord Nitro</strong>. Without Nitro, other people will not see these buttons on your profile.</span>
+        </div>
+        <h2 class="group-title">Links</h2>
+        <div class="group">
+          <div class="row link-row">
+            <input id="label0" maxlength="32" aria-label="Button 1 label" placeholder="Label" />
+            <input id="url0" type="url" aria-label="Button 1 URL" placeholder="https://…" />
+            <button type="button" class="ghost" data-remove="0">Remove</button>
+          </div>
+          <div class="row link-row">
+            <input id="label1" maxlength="32" aria-label="Button 2 label" placeholder="Label" />
+            <input id="url1" type="url" aria-label="Button 2 URL" placeholder="https://…" />
+            <button type="button" class="ghost" data-remove="1">Remove</button>
+          </div>
+        </div>
+        <h2 class="group-title">Quick presets</h2>
+        <div class="chips left">
+          <button type="button" class="chip" data-preset="codex">Open Codex</button>
+          <button type="button" class="chip" data-preset="usage">Usage page</button>
+          <button type="button" class="chip" data-preset="repo">GitHub repo</button>
+        </div>
+      </section>
+
+      <!-- General -->
+      <section data-panel="general" aria-labelledby="general-title" hidden>
+        <h1 id="general-title">General</h1>
+        <p class="sub">App behavior and appearance.</p>
+        <div class="group">
+          <div class="row">
+            <div class="row-text"><span>Theme</span></div>
+            <div class="theme-switch" role="group" aria-label="Theme">
+              <button type="button" data-theme-option="dark">Dark</button>
+              <button type="button" data-theme-option="system">System</button>
+              <button type="button" data-theme-option="light">Light</button>
+            </div>
+          </div>
+          <div class="row">
+            <div class="row-text"><span id="startup-label">Start on Windows</span><small>Launch quietly in the tray when you sign in.</small></div>
+            <button type="button" class="switch" role="switch" id="startup" aria-labelledby="startup-label"></button>
+          </div>
+          <div class="row">
+            <div class="row-text"><span id="lbl-updates">Check for updates</span><small>Looks at GitHub releases once a day.</small></div>
+            <button type="button" class="switch" role="switch" data-key="check_updates" aria-labelledby="lbl-updates"></button>
+          </div>
+        </div>
+        <h2 class="group-title">Troubleshooting</h2>
+        <div class="group">
+          <div class="row">
+            <div class="row-text"><span>Discord</span><small id="discord-status">Not connected</small></div>
+            <button type="button" id="reconnect">Reconnect</button>
+          </div>
+          <div class="row">
+            <div class="row-text"><span>Data folder</span><small>Settings, status and usage history.</small></div>
+            <button type="button" id="open-data">Open folder</button>
+          </div>
+        </div>
+        <h2 class="group-title">About</h2>
+        <div class="group">
+          <div class="row">
+            <div class="row-text"><span>Codex RPC</span><small id="about-version">Discord Rich Presence for OpenAI Codex · MIT license</small></div>
+            <button type="button" data-link="repo">GitHub repo</button>
+          </div>
+          <div class="row">
+            <div class="row-text"><span>Made by Inerthel</span><small>More projects and contact on GitHub.</small></div>
+            <button type="button" data-link="profile">GitHub profile</button>
+          </div>
+          <div class="row">
+            <div class="row-text"><span>Feedback</span><small>Report a bug or suggest a feature.</small></div>
+            <button type="button" data-link="issues">Open an issue</button>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <footer class="actions">
+    <svg id="saved-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12" /></svg>
+    <span id="message" role="status">Changes save automatically</span>
+    <button type="button" id="close" class="primary">Done</button>
+  </footer>
 </body>
 </html>

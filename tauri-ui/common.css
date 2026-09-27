@@ -1,11 +1,12 @@
-/* Shared tokens and usage widgets for the settings window and the tray menu.
+/* Shared tokens and widgets for the settings window and the tray menu.
    Neutral, monochrome palette in the style of OpenAI's apps; green is reserved for "connected". */
 :root {
   color-scheme: dark;
   --bg: #171717; --panel: #212121; --input: #2a2a2a; --line: rgba(255, 255, 255, .1);
   --text: #ececec; --muted: #a3a3a3; --accent: #ececec; --on-accent: #171717;
   --track: #333; --hover: rgba(255, 255, 255, .06); --brand: #10a37f;
-  --danger: #f87171; --warn: #f5a524;
+  --danger: #f87171; --warn: #f5a524; --discord: #5865f2;
+  --dc-bg: #232428; --dc-button: #2b2d31; --dc-text: #dbdee1;
   font-family: ui-sans-serif, -apple-system, "Segoe UI Variable Text", "Segoe UI", sans-serif;
 }
 body[data-theme="light"] {
@@ -14,6 +15,7 @@ body[data-theme="light"] {
   --text: #0d0d0d; --muted: #5d5d5d; --accent: #0d0d0d; --on-accent: #ffffff;
   --track: #e8e8e8; --hover: rgba(0, 0, 0, .05); --brand: #0f8f70;
   --danger: #dc2626; --warn: #c2750a;
+  --dc-bg: #ffffff; --dc-button: #f2f3f5; --dc-text: #313338;
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -21,15 +23,31 @@ p { margin: 0; }
 body { -webkit-font-smoothing: antialiased; }
 :focus-visible { outline: 2px solid var(--muted); outline-offset: 2px; }
 
-.usage-row { display: grid; grid-template-columns: 1fr auto; gap: 8px 12px; }
-.usage-label { color: var(--text); font-size: 12.5px; }
-.usage-value { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
 .usage-empty { color: var(--muted); font-size: 12.5px; }
-progress { grid-column: 1 / -1; appearance: none; width: 100%; height: 4px; border: 0; border-radius: 999px; overflow: hidden; background: var(--track); }
+progress { appearance: none; display: block; width: 100%; height: 6px; border: 0; border-radius: 999px; overflow: hidden; background: var(--track); }
 progress::-webkit-progress-bar { background: var(--track); }
-progress::-webkit-progress-value { background: var(--accent); border-radius: 999px; }
+progress::-webkit-progress-value { background: var(--accent); border-radius: 999px; transition: width .3s ease; }
 progress.low::-webkit-progress-value { background: var(--warn); }
 progress.critical::-webkit-progress-value { background: var(--danger); }
 progress.unavailable { opacity: .4; }
+
+.hero { display: grid; gap: 8px; }
+.hero-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.hero-figure { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.hero-figure b { font-size: 26px; font-weight: 600; letter-spacing: -.02em; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.hero-figure span { color: var(--muted); font-size: 12px; }
+.hero-meta { display: flex; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.plan-chip { flex: none; padding: 1px 9px; border: 1px solid var(--line); border-radius: 999px; color: var(--text); font-size: 11px; font-weight: 600; }
+
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 999px; background: var(--hover); color: var(--muted); font-size: 11px; font-weight: 500; white-space: nowrap; }
+.pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.pill.live { color: var(--brand); background: color-mix(in srgb, var(--brand) 14%, transparent); }
+.pill.paused, .pill.idle { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }
+
+/* role="switch" buttons; aria-checked drives the look. */
+.switch { position: relative; flex: none; width: 30px; height: 18px; padding: 0; border: 0; border-radius: 999px; background: var(--track); cursor: pointer; transition: background .15s ease; }
+.switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--muted); transition: transform .15s ease, background .15s ease; }
+.switch[aria-checked="true"], .switch.on { background: var(--accent); }
+.switch[aria-checked="true"]::after, .switch.on::after { transform: translateX(12px); background: var(--on-accent); }
 
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; } }

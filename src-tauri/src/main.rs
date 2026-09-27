@@ -1,8 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod daemon;
+mod monitor;
 
-use serde::{Deserialize, Serialize};
+use daemon::{RpcSettings, PAUSE_FOREVER};
+use serde::Serialize;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -37,59 +39,8 @@ struct DaemonState {
 #[derive(Default)]
 struct TrayAnchor(Mutex<Option<PhysicalPosition<f64>>>);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RpcButton {
-    label: String,
-    url: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RpcSettings {
-    mode: String,
-    buttons: Vec<RpcButton>,
-    #[serde(default, skip_serializing)]
-    show_usage: Option<bool>,
-    #[serde(default = "default_show_usage")]
-    show_primary_usage: bool,
-    #[serde(default = "default_show_usage")]
-    show_weekly_usage: bool,
-    #[serde(default = "default_show_usage")]
-    show_effort: bool,
-    #[serde(default = "default_show_usage")]
-    show_fast_mode: bool,
-    #[serde(default = "default_show_usage")]
-    show_credits: bool,
-}
-
-impl Default for RpcSettings {
-    fn default() -> Self {
-        Self {
-            mode: "playing".into(),
-            buttons: vec![
-                RpcButton {
-                    label: "Open Codex".into(),
-                    url: "https://chatgpt.com/codex".into(),
-                },
-                RpcButton {
-                    label: "Usage".into(),
-                    url: "https://chatgpt.com/codex/settings/analytics".into(),
-                },
-            ],
-            show_usage: None,
-            show_primary_usage: true,
-            show_weekly_usage: true,
-            show_effort: true,
-            show_fast_mode: true,
-            show_credits: true,
-        }
-    }
-}
-
-fn default_show_usage() -> bool {
-    true
-}
-
-/// Structured view of the `state|model|usage|discord|plan` line written by the daemon.
+/// Structured view of the `state|model|usage|discord|plan|presence|resets|since`
+/// line written by the daemon.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct AppStatus {
     state: String,
@@ -98,6 +49,9 @@ struct AppStatus {
     discord: String,
     plan: String,
     usage: Vec<UsageEntry>,
+    /// `live`, `paused`, `idle` or `off`: whether Discord currently shows the activity.
+    presence: String,
+    started_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -107,11 +61,10 @@ struct DaemonStatus {
     error: Option<String>,
 }
 
-#[tauri::command]
-fn load_settings() -> Result<RpcSettings, String> {
+fn read_settings() -> Result<RpcSettings, String> {
     let path = settings_path()?;
     match fs::read_to_string(&path) {
-        Ok(raw) => Ok(normalize_settings(
+        Ok(raw) => Ok(daemon::normalize_settings(
             serde_json::from_str::<RpcSettings>(raw.trim_start_matches('\u{feff}'))
                 .unwrap_or_default(),
         )),
@@ -120,11 +73,204 @@ fn load_settings() -> Result<RpcSettings, String> {
     }
 }
 
-#[tauri::command]
-fn save_settings(_app: tauri::AppHandle, settings: RpcSettings) -> Result<(), String> {
-    let settings = normalize_settings(settings);
+/// Read-modify-write used by the tray, which only changes one field at a time.
+fn update_settings(change: impl FnOnce(&mut RpcSettings)) -> Result<RpcSettings, String> {
+    let _guard = settings_guard();
+    let mut settings = read_settings()?;
+    change(&mut settings);
+    let settings = daemon::normalize_settings(settings);
     write_settings(&settings)?;
-    Ok(())
+    Ok(settings)
+}
+
+#[tauri::command]
+fn load_settings() -> Result<RpcSettings, String> {
+    read_settings()
+}
+
+#[tauri::command]
+fn save_settings(settings: RpcSettings) -> Result<(), String> {
+    let mut settings = daemon::normalize_settings(settings);
+    let _guard = settings_guard();
+    // The pause belongs to the tray; a settings window opened earlier must not undo it.
+    settings.paused_until_ms = read_settings()?.paused_until_ms;
+    write_settings(&settings)
+}
+
+#[tauri::command]
+fn pause_presence(minutes: u64) -> Result<u64, String> {
+    let until = if minutes == 0 {
+        PAUSE_FOREVER
+    } else {
+        now_ms().saturating_add(minutes.min(24 * 60) * 60_000)
+    };
+    update_settings(|settings| settings.paused_until_ms = until).map(|s| s.paused_until_ms)
+}
+
+#[tauri::command]
+fn resume_presence() -> Result<(), String> {
+    update_settings(|settings| settings.paused_until_ms = 0).map(|_| ())
+}
+
+#[tauri::command]
+fn set_hide_model(enabled: bool) -> Result<bool, String> {
+    update_settings(|settings| settings.hide_model = enabled).map(|s| s.hide_model)
+}
+
+#[tauri::command]
+fn reconnect_discord() {
+    daemon::request_reconnect();
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AppInfo {
+    version: &'static str,
+    update: Option<String>,
+}
+
+#[tauri::command]
+fn app_info(shared: tauri::State<'_, monitor::Shared>) -> AppInfo {
+    AppInfo {
+        version: env!("CARGO_PKG_VERSION"),
+        update: shared.latest_version.lock().ok().and_then(|slot| slot.clone()),
+    }
+}
+
+/// `[utc_hour, weekly_percent_used]` pairs for the last eight days.
+#[tauri::command]
+fn usage_history() -> Vec<(u64, f64)> {
+    monitor::load_history().hours.into_iter().collect()
+}
+
+#[tauri::command]
+fn open_codex() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+        // Codex Desktop ships as a Store package; the shell link also focuses a running window.
+        let store = local
+            .as_ref()
+            .map(|dir| dir.join("Packages").join("OpenAI.Codex_2p2nqsd0c76g0"));
+        if store.is_some_and(|dir| dir.is_dir()) {
+            return open_with_shell(r"shell:AppsFolder\OpenAI.Codex_2p2nqsd0c76g0!App");
+        }
+        if let Some(exe) = local
+            .map(|dir| dir.join("Programs").join("Codex").join("Codex.exe"))
+            .filter(|exe| exe.is_file())
+        {
+            return std::process::Command::new(exe)
+                .spawn()
+                .map(|_| ())
+                .map_err(|err| err.to_string());
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if Path::new("/Applications/Codex.app").is_dir() {
+        return open_with_shell("/Applications/Codex.app");
+    }
+    open_with_shell("https://chatgpt.com/codex")
+}
+
+/// Opens a terminal in the home folder and starts the Codex CLI in it.
+#[tauri::command]
+fn open_codex_cli() -> Result<(), String> {
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_dir());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+        let cmd = Path::new(&root).join("System32").join("cmd.exe");
+        let terminal = std::env::var_os("LOCALAPPDATA")
+            .map(|dir| Path::new(&dir).join("Microsoft").join("WindowsApps").join("wt.exe"))
+            .filter(|wt| wt.is_file());
+        let mut command = match &terminal {
+            Some(wt) => {
+                let mut command = std::process::Command::new(wt);
+                if let Some(home) = &home {
+                    command.arg("-d").arg(home);
+                }
+                command.arg(&cmd);
+                command
+            }
+            None => {
+                let mut command = std::process::Command::new(&cmd);
+                command.creation_flags(CREATE_NEW_CONSOLE);
+                command
+            }
+        };
+        // `/k` keeps the prompt open after Codex exits.
+        command.args(["/k", "codex"]);
+        if let Some(home) = &home {
+            command.current_dir(home);
+        }
+        command.spawn().map(|_| ()).map_err(|err| err.to_string())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = home;
+        std::process::Command::new("/usr/bin/osascript")
+            .args([
+                "-e",
+                r#"tell application "Terminal" to do script "codex""#,
+                "-e",
+                r#"tell application "Terminal" to activate"#,
+            ])
+            .spawn()
+            .map(|_| ())
+            .map_err(|err| err.to_string())
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        let _ = home;
+        Err("Opening a terminal is not supported on this platform".into())
+    }
+}
+
+#[tauri::command]
+fn open_release_page() -> Result<(), String> {
+    open_with_shell("https://github.com/inerthel-agi/codex-rpc/releases/latest")
+}
+
+/// Opens one of the app's fixed links; the page only passes a key.
+#[tauri::command]
+fn open_link(kind: String) -> Result<(), String> {
+    let url = match kind.as_str() {
+        "repo" => "https://github.com/inerthel-agi/codex-rpc",
+        "profile" => "https://github.com/inerthel-agi",
+        "issues" => "https://github.com/inerthel-agi/codex-rpc/issues",
+        _ => return Err("Unknown link".into()),
+    };
+    open_with_shell(url)
+}
+
+#[tauri::command]
+fn open_data_folder() -> Result<(), String> {
+    let dir = app_data_dir()?;
+    fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+    open_with_shell(&dir.to_string_lossy())
+}
+
+/// Hands a fixed URL, folder or shell link to the OS; never called with page input.
+fn open_with_shell(target: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    let mut command = {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+        std::process::Command::new(Path::new(&root).join("explorer.exe"))
+    };
+    #[cfg(not(windows))]
+    let mut command = std::process::Command::new("/usr/bin/open");
+    command.arg(target).spawn().map(|_| ()).map_err(|err| err.to_string())
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn write_settings(settings: &RpcSettings) -> Result<(), String> {
@@ -134,7 +280,17 @@ fn write_settings(settings: &RpcSettings) -> Result<(), String> {
     }
 
     let json = serde_json::to_string_pretty(settings).map_err(|err| err.to_string())?;
-    fs::write(path, json).map_err(|err| err.to_string())
+    // The daemon polls this file; a rename means it never reads a half-written copy.
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, json).map_err(|err| err.to_string())?;
+    fs::rename(&tmp, &path).map_err(|err| err.to_string())
+}
+
+/// Serializes read-modify-write cycles between the tray and the settings window.
+static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
+
+fn settings_guard() -> std::sync::MutexGuard<'static, ()> {
+    SETTINGS_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn read_status_line() -> String {
@@ -167,6 +323,28 @@ fn parse_status_line(line: &str) -> AppStatus {
     });
     let discord = parts.next().unwrap_or("").to_string();
     let plan = parts.next().unwrap_or("").to_string();
+    let presence = match parts.next().filter(|value| !value.is_empty()) {
+        Some(value) => value.to_string(),
+        None if state == "Codex: Off" => "off".into(),
+        None => "live".into(),
+    };
+    let resets: Vec<(&str, u64)> = parts
+        .next()
+        .unwrap_or("")
+        .split(',')
+        .filter_map(|pair| {
+            let (label, ms) = pair.split_once('=')?;
+            Some((label.trim(), ms.trim().parse().ok()?))
+        })
+        .collect();
+    let started_at_ms = parts.next().and_then(|value| value.parse().ok());
+    let mut usage = parse_status_usage(line);
+    for entry in &mut usage {
+        entry.resets_at_ms = resets
+            .iter()
+            .find(|(label, _)| label.eq_ignore_ascii_case(&entry.label))
+            .map(|(_, ms)| *ms);
+    }
 
     AppStatus {
         state: state.to_string(),
@@ -174,7 +352,9 @@ fn parse_status_line(line: &str) -> AppStatus {
         credits,
         discord,
         plan,
-        usage: parse_status_usage(line),
+        usage,
+        presence,
+        started_at_ms,
     }
 }
 
@@ -216,8 +396,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     };
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .manage(DaemonState::default())
         .manage(TrayAnchor::default())
+        .manage(monitor::Shared::default())
         .invoke_handler(tauri::generate_handler![
             load_settings,
             save_settings,
@@ -229,7 +411,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             hide_tray,
             toggle_startup,
             open_settings_from_tray,
-            quit_app
+            quit_app,
+            pause_presence,
+            resume_presence,
+            set_hide_model,
+            reconnect_discord,
+            app_info,
+            usage_history,
+            open_codex,
+            open_codex_cli,
+            open_release_page,
+            open_data_folder,
+            open_link
         ])
         .setup(|app| {
             keep_window_in_tray(app);
@@ -238,6 +431,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let state = app.state::<DaemonState>();
             start_daemon_inner(&handle, &state);
             create_tray(app)?;
+            monitor::spawn(handle);
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -258,7 +452,7 @@ fn keep_window_in_tray(app: &mut tauri::App) {
 }
 
 fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
-    TrayIconBuilder::new()
+    TrayIconBuilder::with_id(monitor::TRAY_ID)
         .tooltip("Codex RPC")
         .icon(app.default_window_icon().unwrap().clone())
         .show_menu_on_left_click(false)
@@ -352,7 +546,7 @@ fn fit_tray(app: tauri::AppHandle, height: f64) -> Result<(), String> {
     if !height.is_finite() {
         return Err("Invalid height".into());
     }
-    let size = tauri::LogicalSize::new(320.0, height.clamp(200.0, 600.0));
+    let size = tauri::LogicalSize::new(320.0, height.clamp(200.0, 680.0));
     window.set_size(size).map_err(|err| err.to_string())?;
     if let Some(cursor) = *app.state::<TrayAnchor>().0.lock().unwrap() {
         position_tray(
@@ -377,14 +571,21 @@ struct TraySnapshot {
     status: AppStatus,
     startup_label: &'static str,
     startup_enabled: bool,
+    paused_until_ms: u64,
+    hide_model: bool,
+    update: Option<String>,
 }
 
 #[tauri::command]
-fn tray_snapshot() -> Result<TraySnapshot, String> {
+fn tray_snapshot(shared: tauri::State<'_, monitor::Shared>) -> Result<TraySnapshot, String> {
+    let settings = read_settings().unwrap_or_default();
     Ok(TraySnapshot {
         status: parse_status_line(&read_status_line()),
         startup_label: startup_menu_label(),
         startup_enabled: startup_enabled(),
+        paused_until_ms: settings.paused_until_ms,
+        hide_model: settings.hide_model,
+        update: shared.latest_version.lock().ok().and_then(|slot| slot.clone()),
     })
 }
 
@@ -415,6 +616,7 @@ struct UsageEntry {
     label: String,
     value: String,
     percent: f64,
+    resets_at_ms: Option<u64>,
 }
 
 fn parse_status_usage(status_line: &str) -> Vec<UsageEntry> {
@@ -450,6 +652,7 @@ fn parse_status_usage(status_line: &str) -> Vec<UsageEntry> {
             label: capitalize(label.trim()),
             value: value.to_string(),
             percent: percent.clamp(0.0, 100.0),
+            resets_at_ms: None,
         });
     }
     entries
@@ -680,60 +883,6 @@ fn show_settings(app: &tauri::AppHandle) {
     }
 }
 
-fn normalize_settings(mut settings: RpcSettings) -> RpcSettings {
-    if settings.show_usage == Some(false) {
-        settings.show_primary_usage = false;
-        settings.show_weekly_usage = false;
-        settings.show_credits = false;
-    }
-    settings.show_usage = None;
-
-    settings.mode = match settings.mode.trim().to_ascii_lowercase().as_str() {
-        "watching" | "tv" => "watching".into(),
-        "listening" | "listen" => "listening".into(),
-        "competing" | "compete" => "competing".into(),
-        _ => "playing".into(),
-    };
-
-    settings.buttons = settings
-        .buttons
-        .into_iter()
-        .filter_map(|button| {
-            let label = clean_label(&button.label)?;
-            let url = clean_url(&button.url)?;
-            Some(RpcButton { label, url })
-        })
-        .take(2)
-        .collect();
-
-    settings
-}
-
-fn clean_label(value: &str) -> Option<String> {
-    let cleaned = value
-        .chars()
-        .filter(|ch| !ch.is_control())
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    if cleaned.is_empty() {
-        None
-    } else {
-        Some(cleaned.chars().take(32).collect())
-    }
-}
-
-fn clean_url(value: &str) -> Option<String> {
-    let value = value.trim();
-    if value.starts_with("http://") || value.starts_with("https://") {
-        Some(value.to_string())
-    } else {
-        None
-    }
-}
-
 fn settings_path() -> Result<PathBuf, String> {
     Ok(app_data_dir()?.join("rpc-buttons.json"))
 }
@@ -838,6 +987,21 @@ mod tests {
         assert!(status.model_parts.is_empty());
         assert_eq!(status.credits, None);
         assert_eq!(status.plan, "plus");
+    }
+
+    #[test]
+    fn status_line_extras_attach_resets_presence_and_start() {
+        let status = parse_status_line(
+            "Codex: CLI|GPT-5|Usage: 5h 42% left / week 7% left|Discord: Not connected|plus|paused|5h=1700,week=9000|1234",
+        );
+        assert_eq!(status.presence, "paused");
+        assert_eq!(status.started_at_ms, Some(1234));
+        let resets: Vec<Option<u64>> = status.usage.iter().map(|e| e.resets_at_ms).collect();
+        assert_eq!(resets, [Some(1700), Some(9000)]);
+        // Lines written before 0.5 have no extra fields.
+        let old = parse_status_line("Codex: CLI||Usage: week 7% left|Discord: Not connected|plus");
+        assert_eq!(old.presence, "live");
+        assert_eq!(old.usage[0].resets_at_ms, None);
     }
 
     #[test]

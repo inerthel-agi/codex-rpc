@@ -17,47 +17,67 @@
           <span class="header-title">Codex RPC</span>
           <span class="header-sub" id="model-line">—</span>
         </div>
-        <span class="status-dot" id="status-dot" title="Status"></span>
+        <span class="pill" id="state-pill">Offline</span>
       </header>
 
-      <div class="section-label"><span>Usage</span><span id="plan">Subscription</span></div>
-      <!-- Rows are built from the limits the daemon reports (tray.js#renderUsage). -->
-      <div class="usage" id="usage">
-        <div class="usage-empty">Waiting for Codex usage…</div>
+      <div class="banner" id="banner" role="status" hidden>
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" /></svg>
+        <span id="banner-text"></span>
       </div>
+
+      <!-- Built from the limits the daemon reports (tray.js#renderUsage). -->
+      <div class="usage" id="usage"></div>
+      <div class="mini" id="mini" hidden></div>
 
       <div class="separator"></div>
 
-      <button type="button" class="item" id="item-startup">
-        <svg class="item-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
-          <polyline points="10 17 15 12 10 7" />
-          <line x1="15" y1="12" x2="3" y2="12" />
-        </svg>
-        <span id="startup-label">Start on Windows</span>
-        <span class="switch" id="startup-switch"><span class="knob"></span></span>
+      <button type="button" class="item" id="item-pause" role="switch" aria-checked="false">
+        <svg class="item-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1" /><rect x="14" y="5" width="4" height="14" rx="1" /></svg>
+        <span class="item-label">Pause Discord presence</span>
+        <span class="switch" aria-hidden="true"></span>
+      </button>
+      <div class="snooze" id="snooze" role="group" aria-label="Pause for">
+        <button type="button" data-minutes="30">30 min</button>
+        <button type="button" data-minutes="60">1 h</button>
+        <button type="button" data-minutes="0">Until I resume</button>
+      </div>
+      <button type="button" class="item" id="item-private" role="switch" aria-checked="false">
+        <svg class="item-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z" /><circle cx="12" cy="12" r="3" /></svg>
+        <span class="item-label">Hide model name</span>
+        <span class="switch" aria-hidden="true"></span>
       </button>
 
+      <div class="separator"></div>
+
+      <button type="button" class="item" id="item-codex">
+        <svg class="item-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg>
+        <span class="item-label">Open Codex</span>
+      </button>
+      <button type="button" class="item" id="item-cli">
+        <svg class="item-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="20" height="16" rx="2" /><polyline points="6 9 9 12 6 15" /><line x1="12" y1="15" x2="17" y2="15" /></svg>
+        <span class="item-label">Open Codex CLI</span>
+      </button>
       <button type="button" class="item" id="item-settings">
-        <svg class="item-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <svg class="item-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <circle cx="12" cy="12" r="3" />
           <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
         </svg>
-        <span>Settings</span>
+        <span class="item-label">Settings…</span>
+        <kbd>Ctrl ,</kbd>
       </button>
-
-      <div class="separator"></div>
-
+      <button type="button" class="item" id="item-update" hidden>
+        <svg class="item-icon update-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
+        <span class="item-label" id="update-label">Update available</span>
+      </button>
       <button type="button" class="item danger" id="item-quit">
-        <svg class="item-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M18.36 6.64a9 9 0 1 1-12.73 0" />
-          <line x1="12" y1="2" x2="12" y2="12" />
-        </svg>
-        <span>Quit Codex RPC</span>
+        <svg class="item-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18.36 6.64a9 9 0 1 1-12.73 0" /><line x1="12" y1="2" x2="12" y2="12" /></svg>
+        <span class="item-label">Quit</span>
       </button>
 
-      <footer class="footer">
-        <span id="discord-line">Discord: —</span>
+      <footer class="discord">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M20.3 4.4A19.8 19.8 0 0 0 15.4 3l-.6 1.3a18.4 18.4 0 0 0-5.6 0L8.6 3a19.7 19.7 0 0 0-4.9 1.5C.6 9.1-.3 13.6.1 18.1a19.9 19.9 0 0 0 6 3l1.3-2.1-2-1 .5-.4a14.2 14.2 0 0 0 12.2 0l.5.4-2 1 1.3 2.1a19.8 19.8 0 0 0 6-3c.5-5.2-.9-9.7-3.6-13.7zM8 15.3c-1.2 0-2.2-1.1-2.2-2.4S6.8 10.5 8 10.5s2.2 1.1 2.2 2.4-1 2.4-2.2 2.4zm8 0c-1.2 0-2.2-1.1-2.2-2.4s1-2.4 2.2-2.4 2.2 1.1 2.2 2.4-1 2.4-2.2 2.4z" /></svg>
+        <span class="discord-text" id="discord-text">Discord: connecting…</span>
+        <button type="button" class="link" id="discord-action" hidden></button>
       </footer>
     </div>
   </body>

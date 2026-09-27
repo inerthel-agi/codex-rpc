@@ -74,7 +74,7 @@ pub(crate) fn badge_icon(rgba: &[u8], width: u32, height: u32, visual: TrayVisua
         return out;
     }
     if visual == TrayVisual::Off {
-        for px in out.chunks_exact_mut(4) {
+        for px in out.as_chunks_mut::<4>().0 {
             let grey = (px[0] as u32 * 30 + px[1] as u32 * 59 + px[2] as u32 * 11) / 100;
             px[..3].fill(grey as u8);
             px[3] = (px[3] as u32 * 55 / 100) as u8;

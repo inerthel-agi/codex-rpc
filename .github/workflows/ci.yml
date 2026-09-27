@@ -10,26 +10,20 @@ permissions:
   contents: read
 
 jobs:
-  build-test:
+  test:
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     permissions:
       contents: read
+    defaults:
+      run:
+        working-directory: src-tauri
     steps:
       # actions/checkout@v4.1.7
       - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332
 
-      # actions/setup-node@v4.0.3
-      - uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b
-        with:
-          node-version: 22
-          cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Type-check
-        run: npm run build
+      - name: Lint
+        run: cargo clippy --all-targets --locked -- -D warnings
 
       - name: Unit tests
-        run: npm test
+        run: cargo test --locked

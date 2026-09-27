@@ -24,7 +24,14 @@ All notable changes to Codex RPC are documented here.
 - Settings window split into Presence, Usage, Profile buttons and General pages, with a Discord-style live preview and a "Switch to Watching" shortcut for profile buttons.
 - Tray menu redesigned: status pill, large usage figure, low-usage banner and a Discord row; "Start on Windows" moved to Settings › General.
 - The daemon and the Tauri commands share one `RpcSettings` definition, so a saved field can no longer be dropped by one side.
+- CI now runs `cargo clippy` and `cargo test` for the app; `npm test` runs the Rust tests.
+- README shows screenshots of the tray menu and each settings page.
 - The status file carries three more fields (presence state, reset times, session start); older lines still parse.
+
+### Removed
+
+- The legacy Node CLI (`src/`, `test/`, `start.bat`, `stop.bat`, `install.ps1`, `.env.example`, its build scripts and npm dependencies). Use the Tauri app instead.
+- Duplicate root images (`Codex.png`, `codex.ico`) and 51 unused generated icons (iOS, Android, Microsoft Store) from `assets/`.
 
 ### Fixed
 

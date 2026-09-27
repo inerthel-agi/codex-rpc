@@ -1,8 +1,0 @@
-{
-  "ProcessId": 9999,
-  "ParentProcessId": 100,
-  "ExecutablePath": "C:\\Program Files\\Codex\\codex.exe",
-  "CommandLine": "\"C:\\Program Files\\Codex\\codex.exe\"",
-  "CreationDate": "/Date(1713437000000)/",
-  "ParentName": "explorer.exe"
-}

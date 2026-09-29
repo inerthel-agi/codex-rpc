@@ -38,11 +38,11 @@ window.UsageView = {
   },
   planLabel(plan) {
     const value = (plan || '').toLowerCase();
-    // `prolite` is the Pro Standard tier (confirmed on a Standard account);
-    // plain `pro` is therefore the higher Pro Plus tier.
+    // Pro tiers are named after the 100/200/500 switch on the pricing page.
     const known = {
-      prolite: 'Pro (Standard)',
-      pro: 'Pro (Plus)',
+      prolite: 'Pro 100',
+      pro: 'Pro 200',
+      promax: 'Pro 500',
       plus: 'Plus',
       go: 'Go',
       free: 'Free',

@@ -2,6 +2,13 @@
 
 All notable changes to Codex RPC are documented here.
 
+## [0.5.1] - 2026-09-29
+
+### Changed
+
+- Pro subscriptions are named after the 100/200/500 switch on the pricing page: `prolite` is now "Pro 100" (was "Pro (Standard)"), `pro` is "Pro 200" (was "Pro (Plus)"), and the new `promax` tier is "Pro 500". The tray, the Usage page, the Plan option and `{plan}` in the custom status line use these names.
+- README screenshots show the new plan names.
+
 ## [0.5.0] - 2026-09-27
 
 ### Added

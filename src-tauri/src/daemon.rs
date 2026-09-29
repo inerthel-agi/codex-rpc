@@ -99,7 +99,7 @@ pub(crate) struct RpcSettings {
     pub(crate) show_fast_mode: bool,
     #[serde(default = "default_true")]
     pub(crate) show_credits: bool,
-    /// Shows the ChatGPT subscription (e.g. "ChatGPT Pro (Standard)"). Only a
+    /// Shows the ChatGPT subscription (e.g. "ChatGPT Pro 100"). Only a
     /// ChatGPT sign-in reports a plan; API-key sessions have none to show.
     #[serde(default)]
     pub(crate) show_plan: bool,
@@ -1062,12 +1062,13 @@ fn compact_usage_parts(result: &DetectionResult) -> Vec<String> {
 }
 
 /// Display name for Codex's `planType`; mirrors `UsageView.planLabel` in usage.js.
-/// `prolite` was confirmed on a Pro Standard account, so plain `pro` is Pro Plus.
+/// Pro tiers are named after the 100/200/500 switch on the pricing page.
 fn plan_label(plan: &str) -> String {
     let value = plan.trim().to_ascii_lowercase();
     let known = match value.as_str() {
-        "prolite" => "Pro (Standard)",
-        "pro" => "Pro (Plus)",
+        "prolite" => "Pro 100",
+        "pro" => "Pro 200",
+        "promax" => "Pro 500",
         "plus" => "Plus",
         "go" => "Go",
         "free" => "Free",
@@ -2756,7 +2757,7 @@ service_tier = "fast"
         filter_usage(&mut shown, &settings);
         assert_eq!(
             build_state_line(&shown, &settings),
-            "GPT-6-Astra - Extra High - Fast - week 97% - ChatGPT Pro (Standard)"
+            "GPT-6-Astra - Extra High - Fast - week 97% - ChatGPT Pro 100"
         );
         let template = RpcSettings {
             custom_state: "{model} on {plan}".into(),
@@ -2764,9 +2765,10 @@ service_tier = "fast"
         };
         assert_eq!(
             build_state_line(&shown, &template),
-            "GPT-6-Astra on Pro (Standard)"
+            "GPT-6-Astra on Pro 100"
         );
-        assert_eq!(plan_label("pro"), "Pro (Plus)");
+        assert_eq!(plan_label("pro"), "Pro 200");
+        assert_eq!(plan_label("promax"), "Pro 500");
         assert_eq!(plan_label("team"), "Business");
         assert_eq!(plan_label("new_tier"), "New_tier");
     }

@@ -124,17 +124,6 @@ impl Limit {
                 .unwrap_or_default(),
         }
     }
-
-    /// One line for the tray menu.
-    #[cfg_attr(windows, allow(dead_code))]
-    fn summary(&self, now: u64) -> String {
-        if !self.available {
-            return self.caption();
-        }
-        let reset = self.reset_in(now);
-        let separator = if reset.is_empty() { "" } else { " · " };
-        format!("{} {}{separator}{reset}", self.figure(), self.caption())
-    }
 }
 
 pub(crate) fn limits(entries: &[UsageEntry], plan: &str) -> Vec<Limit> {
@@ -605,99 +594,6 @@ pub(crate) fn panel_view(
     }
 }
 
-/// What the tray menu shows (macOS and other platforms).
-#[derive(Debug, Clone, Default, PartialEq)]
-#[cfg_attr(windows, allow(dead_code))]
-pub(crate) struct TrayModel {
-    pub(crate) headline: String,
-    pub(crate) facts: Vec<String>,
-    pub(crate) paused: bool,
-    pub(crate) pause_label: String,
-    pub(crate) hide_model: bool,
-    pub(crate) update: String,
-    pub(crate) discord: String,
-    pub(crate) can_reconnect: bool,
-}
-
-#[cfg_attr(windows, allow(dead_code))]
-pub(crate) fn tray_model(
-    status: &AppStatus,
-    settings: &RpcSettings,
-    update: Option<String>,
-    now: u64,
-) -> TrayModel {
-    let active = is_active(&status.state);
-    let paused = settings.paused_until_ms > now;
-    let resumes = if settings.paused_until_ms >= crate::daemon::PAUSE_FOREVER {
-        String::new()
-    } else {
-        format!(
-            " · resumes in {}",
-            humanize_duration(settings.paused_until_ms.saturating_sub(now))
-        )
-    };
-    let (_, _, speed) = split_model(&status.model_parts);
-
-    let headline = if !active {
-        "Codex is not running".to_string()
-    } else {
-        let presence = match status.presence.as_str() {
-            _ if paused => "Paused",
-            "idle" => "Idle",
-            _ => source_label(&status.state),
-        };
-        if status.model_parts.is_empty() {
-            format!("Codex {presence}")
-        } else {
-            format!("{} · {presence}", status.model_parts.join(" · "))
-        }
-    };
-
-    let mut facts: Vec<String> = limits(&status.usage, &status.plan)
-        .iter()
-        .map(|limit| limit.summary(now))
-        .collect();
-    if facts.is_empty() {
-        facts.push("Waiting for Codex usage…".into());
-    }
-    if let Some(credits) = credits_number(status.credits.as_deref()) {
-        facts.push(format!("Credits {credits}"));
-    }
-    if !speed.is_empty() {
-        facts.push(format!("Mode {speed}"));
-    }
-
-    let user = status
-        .discord
-        .strip_suffix(')')
-        .and_then(|text| text.split_once("Connected ("))
-        .map(|(_, user)| user);
-    let discord = match user {
-        None => "Discord not connected".to_string(),
-        Some(user) if !active => format!("Connected as {user} · waiting for Codex"),
-        Some(user) if paused => format!("Hidden from {user}{resumes}"),
-        Some(user) if status.presence == "idle" => format!("Cleared from {user} · Codex is idle"),
-        Some(user) => match status.started_at_ms {
-            Some(started) => format!(
-                "Showing on {user} · {}",
-                humanize_duration(now.saturating_sub(started))
-            ),
-            None => format!("Showing on {user}"),
-        },
-    };
-
-    TrayModel {
-        headline,
-        facts,
-        paused,
-        pause_label: format!("Resume presence{resumes}"),
-        hide_model: settings.hide_model,
-        update: update.unwrap_or_default(),
-        discord,
-        can_reconnect: user.is_none(),
-    }
-}
-
 /// Local time minus UTC. Read once: a DST change is picked up at the next start.
 pub(crate) fn local_offset_ms() -> i64 {
     static OFFSET: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
@@ -718,26 +614,6 @@ fn query_offset_minutes() -> i64 {
     let offset = minutes(local.wHour, local.wMinute) - minutes(utc.wHour, utc.wMinute) + day_shift;
     // The two clocks are read a moment apart; real offsets are multiples of 15 minutes.
     (offset as f64 / 15.0).round() as i64 * 15
-}
-
-#[cfg(not(windows))]
-fn query_offset_minutes() -> i64 {
-    // `date +%z` prints e.g. "+0100".
-    let output = std::process::Command::new("/bin/date")
-        .arg("+%z")
-        .output()
-        .ok();
-    let text = output.map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string());
-    text.and_then(|text| {
-        let value: i64 = text.get(1..)?.parse().ok()?;
-        let minutes = value / 100 * 60 + value % 100;
-        Some(if text.starts_with('-') {
-            -minutes
-        } else {
-            minutes
-        })
-    })
-    .unwrap_or(0)
 }
 
 /// Days since 1970-01-01 to (month, day); Howard Hinnant's civil-from-days.
@@ -908,39 +784,6 @@ mod tests {
         );
         assert!(off.hero.is_none() && off.banner.is_empty());
         assert_eq!(off.discord_action, "reconnect");
-    }
-
-    #[test]
-    fn tray_menu_reports_limits_pause_and_discord() {
-        let status = status(
-            "Codex: Desktop|GPT-6.2-Astra - Max|Usage: week 89% left / credits 0|Discord: Connected (user)|prolite|live|week=7200000|0",
-        );
-        let mut settings = RpcSettings::default();
-        let model = tray_model(&status, &settings, None, 3_600_000);
-        assert_eq!(model.headline, "GPT-6.2-Astra · Max · Desktop");
-        assert_eq!(
-            model.facts,
-            ["89% of weekly limit left · Resets in 1h 0m", "Credits 0"]
-        );
-        assert_eq!(model.discord, "Showing on user · 1h 0m");
-        assert!(!model.paused && !model.can_reconnect);
-
-        settings.paused_until_ms = 3_600_000 + 25 * 60_000;
-        let model = tray_model(&status, &settings, Some("0.6.0".into()), 3_600_000);
-        assert!(model.paused);
-        assert_eq!(model.pause_label, "Resume presence · resumes in 25m");
-        assert_eq!(model.discord, "Hidden from user · resumes in 25m");
-        assert_eq!(model.update, "0.6.0");
-
-        let off = tray_model(
-            &crate::parse_status_line(""),
-            &RpcSettings::default(),
-            None,
-            0,
-        );
-        assert_eq!(off.headline, "Codex is not running");
-        assert_eq!(off.facts, ["Waiting for Codex usage…"]);
-        assert!(off.can_reconnect);
     }
 
     #[test]

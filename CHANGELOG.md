@@ -2,6 +2,18 @@
 
 All notable changes to Codex RPC are documented here.
 
+## [0.6.1] - 2026-11-23
+
+### Fixed
+
+- With Codex Desktop, the project shown is the one of the conversation on screen, also before a message is sent there and when you go back to a conversation opened earlier. It used to stay on the thread written to last, for example the CLI's home folder.
+- A Codex Desktop conversation without a project shows no project instead of a folder name. On the home page and in a new chat, the project picked in the sidebar is shown.
+- With only Codex Desktop or only the CLI running, a thread of the other one no longer supplies the project. With both running, the one used last wins.
+
+### Removed
+
+- macOS support: the macOS code, the native tray menu, the app bundle and DMG packaging, and the macOS release workflow. Codex RPC is Windows only. 0.5.1 is the last release with macOS files.
+
 ## [0.6.0] - 2026-11-23
 
 ### Changed

@@ -1,25 +1,24 @@
 # Codex RPC
 
-Codex RPC shows local Codex activity and account usage in a Windows or macOS tray app and sends the activity to Discord Rich Presence. It supports Codex CLI and Codex Desktop.
+Codex RPC shows local Codex activity and account usage in a Windows tray app and sends the activity to Discord Rich Presence. It supports Codex CLI and Codex Desktop.
 
 ## Requirements
 
-- Windows or macOS with a running Discord desktop client.
-- Windows source builds: Node.js 22, Rust/Cargo, Visual Studio 2022 Build Tools with MSVC v143, and the Windows SDK. The installer also needs NSIS (`makensis`).
-- macOS source builds: Node.js 22, Rust/Cargo, and Xcode Command Line Tools.
-- TODO: Document the minimum supported Windows, macOS, and Rust versions.
+- Windows with a running Discord desktop client.
+- Source builds: Node.js 22, Rust/Cargo, Visual Studio 2022 Build Tools with MSVC v143, and the Windows SDK. The installer also needs NSIS (`makensis`).
+- TODO: Document the minimum supported Windows and Rust versions.
 
 ## Install
 
-Download the installer for your platform from [GitHub Releases](https://github.com/inerthel-agi/codex-rpc/releases/latest), then run it. The Windows release also provides a portable executable.
+Download the installer from [GitHub Releases](https://github.com/inerthel-agi/codex-rpc/releases/latest), then run it. The release also provides a portable executable.
 
-To build from source on Windows or macOS:
+To build from source:
 
 ```powershell
 npm run build
 ```
 
-The Windows build places the portable executable at `bin/codex-rich-presence.exe` and the installer under `src-tauri/target/release/bundle/nsis/`. Without NSIS it builds the executable only. The macOS build creates an app bundle and DMG under `src-tauri/target/release/bundle/`.
+The build places the portable executable at `bin/codex-rich-presence.exe` and the installer under `src-tauri/target/release/bundle/nsis/`. Without NSIS it builds the executable only.
 
 Run the unit tests with:
 
@@ -35,7 +34,7 @@ Start Codex RPC from the installer or launch the portable Windows build:
 .\bin\codex-rich-presence.exe
 ```
 
-The app starts in the system tray. Left-click its icon to open settings. Right-click it to open the tray panel on Windows, or the tray menu on macOS. Launching it again while it runs opens the settings window. To open the settings window at launch:
+The app starts in the system tray. Left-click its icon to open settings. Right-click it to open the tray panel. Launching it again while it runs opens the settings window. To open the settings window at launch:
 
 ```powershell
 .\bin\codex-rich-presence.exe --settings
@@ -49,17 +48,16 @@ The app starts in the system tray. Left-click its icon to open settings. Right-c
 - The usage block shows the most constrained limit, the plan, and when the limit resets. The line under it lists the other limits and the credits. A warning appears at 25% and at 10% left.
 - **Pause Discord presence** hides the activity for 30 minutes, 1 hour, or until you resume it.
 - **Hide model name** replaces the model and effort with `Coding` on Discord and hides the project name.
-- **Open Codex** starts Codex Desktop. **Open Codex CLI** opens Command Prompt in your home folder, or Terminal on macOS, and runs `codex`. **Settings…** also opens with `Ctrl+,`.
+- **Open Codex** starts Codex Desktop. **Open Codex CLI** opens Command Prompt in your home folder and runs `codex`. **Settings…** also opens with `Ctrl+,`.
 - The bottom line shows the Discord connection, with **Reconnect** or **Resume** when one is needed.
 - The panel docks 12 px from the taskbar, also when the icon is in the hidden-icons flyout. `Escape` or a click elsewhere closes it.
-- On macOS the icon opens a native menu with the same entries.
 - The tray icon turns grey when Codex is off and shows a dot when the presence is paused or a limit is low.
 
 ### Settings
 
 <img src="docs/screenshots/settings-presence.png" alt="Presence settings with the Discord preview" width="640">
 
-**Presence** previews the Discord card as it will appear. The second line names the folder of the Codex thread you last worked in, unless **Hide model name** is on. The page sets the activity type, the details shown after the model (5-hour and weekly limits, effort, Fast mode, credits, plan), the elapsed timer, clearing the presence after 15, 30, or 60 idle minutes, and an optional custom status line. The custom line accepts `{model}`, `{effort}`, `{speed}`, `{5h}`, `{week}`, `{credits}`, `{plan}`, and `{project}`.
+**Presence** previews the Discord card as it will appear. The second line names the project, unless **Hide model name** is on. With Codex Desktop, it is the project of the conversation on screen. A conversation without a project shows none. With the CLI, it is the folder of the thread you last worked in. The page sets the activity type, the details shown after the model (5-hour and weekly limits, effort, Fast mode, credits, plan), the elapsed timer, clearing the presence after 15, 30, or 60 idle minutes, and an optional custom status line. The custom line accepts `{model}`, `{effort}`, `{speed}`, `{5h}`, `{week}`, `{credits}`, `{plan}`, and `{project}`.
 
 <img src="docs/screenshots/settings-usage.png" alt="Usage page with limits, credits and a 7-day chart" width="640">
 
@@ -71,7 +69,7 @@ Codex RPC shows the weekly allowance for Pro subscriptions and both 5-hour and w
 
 ## Configuration
 
-The settings window saves every option above. Settings are stored in `%LOCALAPPDATA%\codex-rich-presence\rpc-buttons.json` on Windows and `~/Library/Application Support/codex-rich-presence/rpc-buttons.json` on macOS. The theme is stored next to it in `theme.txt`.
+The settings window saves every option above. Settings are stored in `%LOCALAPPDATA%\codex-rich-presence\rpc-buttons.json`. The theme is stored next to it in `theme.txt`.
 
 | Variable or flag | Type | Default | Effect |
 | --- | --- | --- | --- |
@@ -83,9 +81,8 @@ The settings window saves every option above. Settings are stored in `%LOCALAPPD
 ## Limitations
 
 - Discord must be running for Rich Presence to appear.
-- The macOS build is untested since the interface moved from a web view to Slint.
-- The macOS app is ad-hoc signed and is not notarized. If Gatekeeper blocks the download, clear its quarantine attribute with `xattr -cr "/Applications/Codex RPC.app"` after reviewing the app.
-- On Windows 10 the title bar only switches between light and dark; Windows 11 gives it the theme's colour. The macOS tray menu follows the system theme.
+- macOS is not supported since 0.6.1; 0.5.1 is the last release with macOS files.
+- On Windows 10 the title bar only switches between light and dark; Windows 11 gives it the theme's colour.
 - Usage windows other than 5 hours and one week are not displayed.
 
 ## License

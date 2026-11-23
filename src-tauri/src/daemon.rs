@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
+    ffi::{c_char, c_int, c_void, CStr, CString},
     fs::{self, File},
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -15,8 +16,6 @@ use std::{
 
 #[cfg(windows)]
 use std::fs::OpenOptions;
-#[cfg(unix)]
-use std::os::unix::net::UnixStream;
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
 #[cfg(windows)]
@@ -404,7 +403,7 @@ fn detect(machine: &mut StateMachine, idle_grace_ms: u64) -> DetectionResult {
     let session = if state == PresenceState::Idle {
         None
     } else {
-        read_codex_session()
+        read_codex_session(state)
     };
 
     let result = DetectionResult {
@@ -424,7 +423,7 @@ fn refresh_codex_metadata(result: &mut DetectionResult) {
     let session = if result.state == PresenceState::Idle {
         None
     } else {
-        read_codex_session()
+        read_codex_session(result.state)
     };
     result.codex = read_codex_config(session.as_ref().map(|session| session.cwd.as_str()));
     if result.state != PresenceState::Idle {
@@ -489,7 +488,6 @@ fn classify_process(process: &ProcessSnapshot) -> PresenceState {
     if exe_unix.contains("/openai/codex/")
         || exe_unix.contains("/programs/codex/")
         || exe_unix.contains("/program files/codex/")
-        || exe_unix.contains("/codex.app/contents/")
     {
         return PresenceState::App;
     }
@@ -518,24 +516,7 @@ fn classify_process(process: &ProcessSnapshot) -> PresenceState {
             | "tabby.exe"
             | "fluent-terminal.exe"
             | "hyper.exe"
-            | "zsh"
-            | "bash"
-            | "sh"
-            | "fish"
-            | "nu"
-            | "terminal"
-            | "iterm2"
-            | "warp"
-            | "ghostty"
-            | "alacritty"
-            | "tabby"
-            | "hyper"
-            | "code"
-            | "cursor"
-    ) || parent.contains(".app/contents/macos/code")
-        || parent.contains(".app/contents/macos/cursor")
-        || parent.contains(".app/contents/macos/terminal")
-        || parent.contains(".app/contents/macos/iterm2");
+    );
 
     if shell_parent {
         return PresenceState::Cli;
@@ -549,16 +530,6 @@ fn classify_process(process: &ProcessSnapshot) -> PresenceState {
 #[cfg(windows)]
 fn scan_codex_processes() -> Vec<ProcessSnapshot> {
     scan_codex_processes_windows()
-}
-
-#[cfg(target_os = "macos")]
-fn scan_codex_processes() -> Vec<ProcessSnapshot> {
-    scan_codex_processes_macos()
-}
-
-#[cfg(all(not(windows), not(target_os = "macos")))]
-fn scan_codex_processes() -> Vec<ProcessSnapshot> {
-    Vec::new()
 }
 
 #[cfg(windows)]
@@ -600,16 +571,11 @@ fn process_owner(mut pid: u32, parents: &HashMap<u32, (u32, String)>) -> Option<
         let name = name.to_ascii_lowercase();
         if matches!(
             command_basename(&name).as_str(),
-            "codex-rich-presence.exe"
-                | "codex_rich_presence_tray.exe"
-                | "codex-rich-presence"
-                | "codex_rich_presence_tray"
+            "codex-rich-presence.exe" | "codex_rich_presence_tray.exe"
         ) {
             return Some(PresenceState::Idle);
         }
-        if matches!(command_basename(&name).as_str(), "chatgpt.exe" | "chatgpt")
-            || name.contains("/codex.app/contents/")
-        {
+        if command_basename(&name) == "chatgpt.exe" {
             return Some(PresenceState::App);
         }
         pid = *parent_pid;
@@ -701,100 +667,6 @@ fn filetime_to_unix_ms(value: FILETIME) -> Option<u64> {
     let ticks = ((value.dwHighDateTime as u64) << 32) | value.dwLowDateTime as u64;
     let ms = ticks / 10_000;
     ms.checked_sub(WINDOWS_TO_UNIX_EPOCH_MS)
-}
-
-#[cfg(target_os = "macos")]
-#[derive(Debug, Clone)]
-struct MacProcessEntry {
-    process_id: u32,
-    parent_process_id: u32,
-    command: String,
-}
-
-#[cfg(target_os = "macos")]
-fn scan_codex_processes_macos() -> Vec<ProcessSnapshot> {
-    let entries = list_macos_process_entries();
-    let commands = entries
-        .iter()
-        .map(|entry| (entry.process_id, entry.command.clone()))
-        .collect::<HashMap<_, _>>();
-    let parents = entries
-        .iter()
-        .map(|entry| {
-            (
-                entry.process_id,
-                (entry.parent_process_id, entry.command.clone()),
-            )
-        })
-        .collect();
-
-    entries
-        .into_iter()
-        .filter(|entry| is_macos_codex_candidate(&entry.command))
-        .map(|entry| ProcessSnapshot {
-            owner: process_owner(entry.parent_process_id, &parents),
-            parent_name: commands.get(&entry.parent_process_id).cloned(),
-            executable_path: Some(entry.command),
-            creation_date_ms: None,
-        })
-        .collect()
-}
-
-#[cfg(target_os = "macos")]
-fn list_macos_process_entries() -> Vec<MacProcessEntry> {
-    let Ok(output) = std::process::Command::new("/bin/ps")
-        .args(["-axo", "pid=,ppid=,command="])
-        .output()
-    else {
-        return Vec::new();
-    };
-    if !output.status.success() {
-        return Vec::new();
-    }
-
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(parse_macos_process_line)
-        .collect()
-}
-
-#[cfg(target_os = "macos")]
-fn parse_macos_process_line(line: &str) -> Option<MacProcessEntry> {
-    let (process_id, rest) = split_process_field(line)?;
-    let (parent_process_id, rest) = split_process_field(rest)?;
-    let process_id = process_id.parse().ok()?;
-    let parent_process_id = parent_process_id.parse().ok()?;
-    let command = rest.trim_start().to_string();
-    if command.is_empty() {
-        return None;
-    }
-    Some(MacProcessEntry {
-        process_id,
-        parent_process_id,
-        command,
-    })
-}
-
-#[cfg(target_os = "macos")]
-fn split_process_field(input: &str) -> Option<(&str, &str)> {
-    let input = input.trim_start();
-    if input.is_empty() {
-        return None;
-    }
-    let end = input.find(char::is_whitespace).unwrap_or(input.len());
-    Some((&input[..end], &input[end..]))
-}
-
-#[cfg(target_os = "macos")]
-fn is_macos_codex_candidate(command: &str) -> bool {
-    let command = command.to_ascii_lowercase();
-    if command.contains("codex-rich-presence") {
-        return false;
-    }
-    command.contains("/node_modules/@openai/codex/")
-        || command.contains("/@openai/codex/")
-        || command.contains(".app/contents/macos/codex")
-        || command_basename(&command) == "codex"
 }
 
 fn command_basename(command: &str) -> String {
@@ -1357,6 +1229,8 @@ struct RolloutScan {
     /// Sub-agent threads (workers, reviews) run their own model, not the one
     /// the user picked.
     subagent: bool,
+    /// Started by Codex Desktop; anything else is the CLI or an editor extension.
+    desktop: bool,
     cwd: Option<String>,
     turn: Option<(CodexConfig, Option<u64>)>,
     /// Timestamp of the last complete line: when Codex last wrote to the thread.
@@ -1369,6 +1243,7 @@ impl RolloutScan {
         if self.scanned == 0 {
             if let Ok(meta) = serde_json::from_str::<Value>(&text) {
                 self.subagent = is_subagent_meta(&meta);
+                self.desktop = meta["payload"]["originator"].as_str() == Some("Codex Desktop");
                 self.cwd = meta["payload"]["cwd"]
                     .as_str()
                     .filter(|_| meta["type"].as_str() == Some("session_meta"))
@@ -1474,21 +1349,291 @@ fn latest_turn_context(root: &Path) -> Option<(CodexConfig, u64)> {
         .max_by_key(|(_, ts)| *ts)
 }
 
-/// The project of the thread the user last worked in, and the last time any
-/// thread (sub-agents included) wrote something, for "Clear when idle".
-fn current_session(root: &Path) -> Option<CodexSession> {
+/// The project of the thread the user last worked in, whether Codex Desktop
+/// started that thread and when it was last written to. The session also carries
+/// the last time any thread (sub-agents included) wrote something, for "Clear
+/// when idle". A thread of a client that is not running ranks last: the CLI's
+/// folder must not show while only Desktop is open.
+fn current_session(root: &Path, state: PresenceState) -> Option<(CodexSession, bool, u64)> {
     let scans = recent_scans(root);
     let last_activity_ms = scans.iter().map(|(.., active)| *active).max()?;
-    let (_, scan, _) = scans
+    let running = |scan: &RolloutScan| match state {
+        PresenceState::App => scan.desktop,
+        PresenceState::Cli => !scan.desktop,
+        _ => true,
+    };
+    let (_, scan, active) = scans
         .iter()
         .filter(|(_, scan, _)| scan.cwd.is_some())
-        .max_by_key(|(_, scan, active)| (!scan.subagent, *active))?;
+        .max_by_key(|(_, scan, active)| (running(scan), !scan.subagent, *active))?;
     let cwd = scan.cwd.clone()?;
-    Some(CodexSession {
+    let session = CodexSession {
         repo_name: basename_safe(&cwd),
         cwd,
         last_activity_ms,
-    })
+    };
+    Some((session, scan.desktop, *active))
+}
+
+// SQLite ships with Windows as winsqlite3.dll.
+#[link(name = "winsqlite3", kind = "raw-dylib")]
+extern "system" {
+    fn sqlite3_open_v2(
+        filename: *const c_char,
+        db: *mut *mut c_void,
+        flags: c_int,
+        vfs: *const c_char,
+    ) -> c_int;
+    fn sqlite3_busy_timeout(db: *mut c_void, ms: c_int) -> c_int;
+    fn sqlite3_prepare_v2(
+        db: *mut c_void,
+        sql: *const c_char,
+        bytes: c_int,
+        statement: *mut *mut c_void,
+        tail: *mut *const c_char,
+    ) -> c_int;
+    fn sqlite3_step(statement: *mut c_void) -> c_int;
+    fn sqlite3_column_text(statement: *mut c_void, column: c_int) -> *const c_char;
+    fn sqlite3_finalize(statement: *mut c_void) -> c_int;
+    fn sqlite3_close(db: *mut c_void) -> c_int;
+}
+
+/// The settings rows of Codex Desktop about projects: the list, the one selected
+/// in the sidebar and the project of each thread.
+/// None when the database cannot be read, for example while Desktop writes to it.
+fn read_desktop_settings(path: &Path) -> Option<Vec<(String, String)>> {
+    const READ_ONLY: c_int = 1;
+    const ROW: c_int = 100;
+    const DONE: c_int = 101;
+    const SQL: &CStr = c"SELECT key, value FROM settings WHERE scope = 'global' AND (key IN ('local-projects', 'thread-project-assignments', 'projectless-thread-ids', 'electron-renderer-content-owner') OR key LIKE 'electron-owner-value:selected-project:%')";
+    let file = CString::new(path.to_str()?).ok()?;
+    let mut db = std::ptr::null_mut();
+    let mut statement = std::ptr::null_mut();
+    let mut rows = Vec::new();
+    let text = |pointer: *const c_char| {
+        (!pointer.is_null()).then(|| {
+            unsafe { CStr::from_ptr(pointer) }
+                .to_string_lossy()
+                .into_owned()
+        })
+    };
+    unsafe {
+        let mut code = sqlite3_open_v2(file.as_ptr(), &mut db, READ_ONLY, std::ptr::null());
+        if code == 0 {
+            sqlite3_busy_timeout(db, 50);
+            code = sqlite3_prepare_v2(db, SQL.as_ptr(), -1, &mut statement, std::ptr::null_mut());
+        }
+        if code == 0 {
+            loop {
+                code = sqlite3_step(statement);
+                if code != ROW {
+                    break;
+                }
+                let key = text(sqlite3_column_text(statement, 0));
+                let value = text(sqlite3_column_text(statement, 1));
+                if let (Some(key), Some(value)) = (key, value) {
+                    rows.push((key, value));
+                }
+            }
+        }
+        // Both accept a null handle, and a failed open still hands one back.
+        sqlite3_finalize(statement);
+        sqlite3_close(db);
+        (code == DONE).then_some(rows)
+    }
+}
+
+/// Name and first folder of a project.
+type Project = (String, String);
+
+/// What Codex Desktop knows about projects.
+#[derive(Debug, Default)]
+struct DesktopProjects {
+    projects: Value,
+    assignments: Value,
+    projectless: Value,
+    /// Id of the project picked in the sidebar, which a new chat starts in.
+    selected: Option<String>,
+}
+
+impl DesktopProjects {
+    fn parse(rows: &[(String, String)]) -> Self {
+        let json = |key: &str| {
+            let row = rows.iter().find(|(name, _)| name == key);
+            row.and_then(|(_, value)| serde_json::from_str::<Value>(value).ok())
+                .unwrap_or_default()
+        };
+        // One row per signed-in account; the one on screen wins.
+        let owner = json("electron-renderer-content-owner");
+        let owner = owner.as_str();
+        let selected = rows
+            .iter()
+            .filter(|(key, _)| key.starts_with("electron-owner-value:selected-project:"))
+            .max_by_key(|(key, _)| owner.is_some_and(|owner| key.ends_with(owner)))
+            .and_then(|(_, value)| serde_json::from_str::<Value>(value).ok())
+            .and_then(|value| value["projectId"].as_str().map(str::to_string));
+        Self {
+            projects: json("local-projects"),
+            assignments: json("thread-project-assignments"),
+            projectless: json("projectless-thread-ids"),
+            selected,
+        }
+    }
+
+    fn project(&self, id: &str) -> Option<Project> {
+        let project = &self.projects[id];
+        let root = strip_windows_long_prefix(project["rootPaths"][0].as_str()?).to_string();
+        let name = project["name"].as_str().filter(|name| !name.is_empty());
+        Some((
+            name.map_or_else(|| basename_safe(&root), str::to_string),
+            root,
+        ))
+    }
+
+    /// The project a thread is filed under: `Some(None)` when Desktop lists it
+    /// without one, `None` when Desktop does not file the thread at all.
+    fn thread_project(&self, thread: &str) -> Option<Option<Project>> {
+        if let Some(id) = self.assignments[thread]["projectId"].as_str() {
+            return Some(self.project(id));
+        }
+        let listed = self
+            .projectless
+            .as_array()
+            .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(thread)));
+        listed.then_some(None)
+    }
+}
+
+fn desktop_projects() -> Option<Arc<DesktopProjects>> {
+    static CACHE: std::sync::Mutex<Option<(u64, Arc<DesktopProjects>)>> =
+        std::sync::Mutex::new(None);
+    let path = home_dir().join(".codex").join(".codex-global-state.sqlite");
+    let mtime = modified_ms(&path)?;
+    let mut cache = CACHE.lock().ok()?;
+    if cache.as_ref().is_none_or(|(seen, _)| *seen != mtime) {
+        // A failed read keeps the previous answer and tries again at the next poll.
+        if let Some(rows) = read_desktop_settings(&path) {
+            *cache = Some((mtime, Arc::new(DesktopProjects::parse(&rows))));
+        }
+    }
+    cache.as_ref().map(|(_, projects)| projects.clone())
+}
+
+/// Codex Desktop's log files of its last two days of use.
+fn desktop_log_files() -> Vec<PathBuf> {
+    let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) else {
+        return Vec::new();
+    };
+    let children = |dir: &Path| {
+        let mut paths: Vec<PathBuf> = fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .collect();
+        paths.sort();
+        paths
+    };
+    // The Store package keeps its files under Packages; a plain install does not.
+    let mut roots = vec![local.join("Codex").join("Logs")];
+    for package in children(&local.join("Packages")) {
+        let name = package.file_name().unwrap_or_default().to_string_lossy();
+        if name.starts_with("OpenAI.Codex_") {
+            roots.push(package.join("LocalCache\\Local\\Codex\\Logs"));
+        }
+    }
+    let mut files = Vec::new();
+    for root in roots {
+        // Logs/<year>/<month>/<day>
+        let days: Vec<PathBuf> = children(&root)
+            .iter()
+            .flat_map(|year| children(year))
+            .flat_map(|month| children(&month))
+            .collect();
+        for day in days.iter().rev().take(2) {
+            files.extend(children(day).into_iter().filter(|file| {
+                let name = file.file_name().unwrap_or_default().to_string_lossy();
+                name.starts_with("codex-desktop-") && name.ends_with(".log")
+            }));
+        }
+    }
+    files
+}
+
+/// Time and page of a "the window now shows this page" line of Desktop's log.
+fn parse_desktop_route(line: &str) -> Option<(u64, String)> {
+    let (_, rest) = line.split_once(" ownerRoutePath=")?;
+    let route = rest.split_whitespace().next()?;
+    let at = parse_utc_timestamp_ms(line.split(' ').next()?)?;
+    Some((at, route.to_string()))
+}
+
+/// The page Codex Desktop shows and since when: `/local/<thread id>` for a
+/// conversation. Its log is the only place that tells when the user goes back to a
+/// conversation that is already loaded.
+fn desktop_route() -> Option<(u64, String)> {
+    type Seen = (HashMap<PathBuf, u64>, Option<(u64, String)>);
+    static LOGS: std::sync::Mutex<Option<Seen>> = std::sync::Mutex::new(None);
+    let mut logs = LOGS.lock().ok()?;
+    let (read, latest) = logs.get_or_insert_with(Default::default);
+    let files = desktop_log_files();
+    read.retain(|file, _| files.contains(file));
+    for file in files {
+        let mut offset = read.get(&file).copied().unwrap_or(0);
+        let Ok(mut handle) = File::open(&file) else {
+            continue;
+        };
+        if handle.seek(SeekFrom::Start(offset)).is_err() {
+            continue;
+        }
+        let mut reader = BufReader::new(handle);
+        let mut line = Vec::new();
+        // A line without its newline is still being written; the next poll reads it.
+        while reader
+            .read_until(b'\n', &mut line)
+            .is_ok_and(|size| size > 0)
+            && line.ends_with(b"\n")
+        {
+            offset += line.len() as u64;
+            if let Some(route) = parse_desktop_route(&String::from_utf8_lossy(&line)) {
+                if latest.as_ref().is_none_or(|(at, _)| route.0 >= *at) {
+                    *latest = Some(route);
+                }
+            }
+            line.clear();
+        }
+        read.insert(file, offset);
+    }
+    latest.clone()
+}
+
+/// The project of what Codex Desktop shows, or None when it has no project.
+/// `thread_cwd` gives the folder of a thread Desktop does not file anywhere.
+fn project_on_screen(
+    route: Option<&str>,
+    known: &DesktopProjects,
+    thread_cwd: impl Fn(&str) -> Option<String>,
+) -> Option<Project> {
+    let Some(thread) = route.and_then(|route| route.strip_prefix("/local/")) else {
+        // Home, a new chat or a settings page: the project picked in the sidebar.
+        return known.selected.as_deref().and_then(|id| known.project(id));
+    };
+    let thread = thread.split(['/', '?', '#']).next().unwrap_or(thread);
+    match known.thread_project(thread) {
+        Some(project) => project,
+        // Such as a CLI thread opened in Desktop: the folder it was started in.
+        None => thread_cwd(thread).map(|cwd| (basename_safe(&cwd), cwd)),
+    }
+}
+
+/// Folder of a thread seen in the rollouts of the last day.
+fn scanned_thread_cwd(thread: &str) -> Option<String> {
+    let scans = ROLLOUT_SCANS.get()?.lock().ok()?;
+    let file = format!("{thread}.jsonl");
+    let (_, scan) = scans
+        .iter()
+        .find(|(path, _)| path.to_string_lossy().ends_with(&file))?;
+    scan.cwd.clone()
 }
 
 fn parse_turn_context_line(line: &str) -> Option<(CodexConfig, Option<u64>)> {
@@ -1550,8 +1695,29 @@ fn parse_utc_timestamp_ms(ts: &str) -> Option<u64> {
     u64::try_from(ms).ok()
 }
 
-fn read_codex_session() -> Option<CodexSession> {
-    current_session(&sessions_dir())
+fn read_codex_session(state: PresenceState) -> Option<CodexSession> {
+    let (mut session, desktop_thread, active) = current_session(&sessions_dir(), state)?;
+    let route = desktop_route();
+    let follow_desktop = match state {
+        PresenceState::App => true,
+        // With the CLI open too: whichever was used last.
+        PresenceState::Both => desktop_thread || route.as_ref().is_some_and(|(at, _)| *at > active),
+        _ => false,
+    };
+    if follow_desktop {
+        if let Some(known) = desktop_projects() {
+            let route = route.as_ref().map(|(_, route)| route.as_str());
+            match project_on_screen(route, &known, scanned_thread_cwd) {
+                Some((name, root)) => {
+                    session.repo_name = name;
+                    session.cwd = root;
+                }
+                // A conversation without a project shows none.
+                None => session.repo_name.clear(),
+            }
+        }
+    }
+    Some(session)
 }
 
 fn read_codex_usage() -> Option<CodexUsage> {
@@ -1772,15 +1938,6 @@ fn codex_command_candidates() -> Vec<PathBuf> {
             );
         }
     }
-    #[cfg(not(windows))]
-    {
-        if let Some(home) = std::env::var_os("HOME") {
-            candidates.push(PathBuf::from(home).join(".local").join("bin").join("codex"));
-        }
-        candidates.push(PathBuf::from("/opt/homebrew/bin/codex"));
-        candidates.push(PathBuf::from("/usr/local/bin/codex"));
-        candidates.push(PathBuf::from("/usr/bin/codex"));
-    }
     candidates.retain(|p| p.is_file());
     candidates
 }
@@ -1993,8 +2150,6 @@ struct DiscordIpc {
 enum IpcConnection {
     #[cfg(windows)]
     File(File),
-    #[cfg(unix)]
-    Unix(UnixStream),
 }
 
 impl Read for IpcConnection {
@@ -2005,8 +2160,6 @@ impl Read for IpcConnection {
                 wait_pipe_readable(file, IPC_READ_TIMEOUT_MS)?;
                 file.read(buf)
             }
-            #[cfg(unix)]
-            Self::Unix(stream) => stream.read(buf),
         }
     }
 }
@@ -2040,8 +2193,6 @@ impl Write for IpcConnection {
         match self {
             #[cfg(windows)]
             Self::File(file) => file.write(buf),
-            #[cfg(unix)]
-            Self::Unix(stream) => stream.write(buf),
         }
     }
 
@@ -2049,8 +2200,6 @@ impl Write for IpcConnection {
         match self {
             #[cfg(windows)]
             Self::File(file) => file.flush(),
-            #[cfg(unix)]
-            Self::Unix(stream) => stream.flush(),
         }
     }
 }
@@ -2171,44 +2320,6 @@ fn connect_discord_ipc() -> std::io::Result<IpcConnection> {
         std::io::ErrorKind::NotFound,
         "discord ipc",
     ))
-}
-
-#[cfg(unix)]
-fn connect_discord_ipc() -> std::io::Result<IpcConnection> {
-    for base in discord_ipc_roots() {
-        for id in 0..10 {
-            let path = base.join(format!("discord-ipc-{id}"));
-            if let Ok(stream) = UnixStream::connect(path) {
-                let _ = stream.set_read_timeout(Some(Duration::from_millis(IPC_READ_TIMEOUT_MS)));
-                return Ok(IpcConnection::Unix(stream));
-            }
-        }
-    }
-    Err(std::io::Error::new(
-        std::io::ErrorKind::NotFound,
-        "discord ipc",
-    ))
-}
-
-#[cfg(unix)]
-fn discord_ipc_roots() -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    for name in ["XDG_RUNTIME_DIR", "TMPDIR", "TMP", "TEMP"] {
-        if let Some(path) = std::env::var_os(name).map(PathBuf::from) {
-            push_unique_path(&mut roots, path);
-        }
-    }
-    for path in ["/tmp", "/var/tmp", "/usr/tmp"] {
-        push_unique_path(&mut roots, PathBuf::from(path));
-    }
-    roots
-}
-
-#[cfg(unix)]
-fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
-    if !paths.iter().any(|existing| existing == &path) {
-        paths.push(path);
-    }
 }
 
 fn clean_label(value: &str) -> Option<String> {
@@ -2660,7 +2771,7 @@ service_tier = "fast"
     #[test]
     #[ignore = "Reads the local ~/.codex sessions"]
     fn live_codex_config() {
-        let session = read_codex_session();
+        let session = read_codex_session(PresenceState::App);
         println!("session={session:?}");
         println!(
             "{:?}",
@@ -2770,7 +2881,7 @@ service_tier = "fast"
             "2099-01-01T10:09:00.000Z",
         );
 
-        let session = current_session(&dir).unwrap();
+        let (session, ..) = current_session(&dir, PresenceState::Both).unwrap();
         assert_eq!(session.repo_name, "project-a");
         // A worker writing still counts as activity.
         assert_eq!(
@@ -2780,7 +2891,7 @@ service_tier = "fast"
 
         // A deleted thread drops out of the results and of the cache.
         fs::remove_file(dir.join("rollout-w.jsonl")).unwrap();
-        let session = current_session(&dir).unwrap();
+        let (session, ..) = current_session(&dir, PresenceState::Both).unwrap();
         assert_eq!(
             session.last_activity_ms,
             parse_utc_timestamp_ms("2099-01-01T10:05:00.000Z").unwrap()
@@ -2790,6 +2901,128 @@ service_tier = "fast"
         assert!(cached.contains_key(&dir.join("rollout-a.jsonl")));
         drop(cached);
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn project_follows_the_client_that_is_running() {
+        let dir = std::env::temp_dir().join(format!(
+            "codex-rpc-clients-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let thread = |name: &str, originator: &str, cwd: &str, at: &str| {
+            let meta = json!({
+                "type": "session_meta",
+                "payload": {"cwd": cwd, "originator": originator},
+            });
+            let line = format!(r#"{{"timestamp":"{at}","type":"event_msg","payload":{{}}}}"#);
+            fs::write(dir.join(name), format!("{meta}\n{line}\n")).unwrap();
+        };
+        // The CLI wrote last, from the home folder.
+        thread(
+            "rollout-cli.jsonl",
+            "codex-tui",
+            "C:/Users/me",
+            "2099-01-01T10:05:00.000Z",
+        );
+        thread(
+            "rollout-app.jsonl",
+            "Codex Desktop",
+            "C:/code/game",
+            "2099-01-01T09:00:00.000Z",
+        );
+        let project = |state| {
+            let (session, desktop, _) = current_session(&dir, state).unwrap();
+            (session.repo_name, desktop)
+        };
+        assert_eq!(project(PresenceState::App), ("game".to_string(), true));
+        assert_eq!(project(PresenceState::Cli), ("me".to_string(), false));
+        assert_eq!(project(PresenceState::Both), ("me".to_string(), false));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn project_follows_the_page_codex_desktop_shows() {
+        let row = |key: &str, value: Value| (key.to_string(), value.to_string());
+        let rows = vec![
+            row(
+                "electron-owner-value:selected-project:aaaa",
+                json!({"type": "local", "projectId": "p1"}),
+            ),
+            row(
+                "electron-owner-value:selected-project:bbbb",
+                json!({"type": "local", "projectId": "p2"}),
+            ),
+            row("electron-renderer-content-owner", json!("bbbb")),
+            row(
+                "local-projects",
+                json!({
+                    "p1": {"name": "Site", "rootPaths": ["C:\\code\\site"]},
+                    "p2": {"name": "", "rootPaths": ["\\\\?\\C:\\code\\game"]},
+                }),
+            ),
+            row(
+                "thread-project-assignments",
+                json!({"t-site": {"projectKind": "local", "projectId": "p1"}}),
+            ),
+            row("projectless-thread-ids", json!(["t-chat"])),
+        ];
+        let known = DesktopProjects::parse(&rows);
+        let cwd = |thread: &str| (thread == "t-cli").then(|| "C:/code/tool".to_string());
+        let name = |route| project_on_screen(route, &known, cwd).map(|(name, _)| name);
+
+        // A conversation filed under a project, whatever the sidebar selection says.
+        assert_eq!(name(Some("/local/t-site")).as_deref(), Some("Site"));
+        // A conversation without a project shows none.
+        assert_eq!(name(Some("/local/t-chat")), None);
+        // A thread Desktop does not file, such as one started in the CLI: its folder.
+        assert_eq!(name(Some("/local/t-cli")).as_deref(), Some("tool"));
+        assert_eq!(name(Some("/local/unknown")), None);
+        // Home, or no log at all: the project of the account on screen.
+        assert_eq!(name(Some("/")).as_deref(), Some("game"));
+        assert_eq!(
+            project_on_screen(None, &known, cwd),
+            Some(("game".to_string(), r"C:\code\game".to_string()))
+        );
+        assert_eq!(
+            project_on_screen(None, &DesktopProjects::default(), cwd),
+            None
+        );
+    }
+
+    #[test]
+    fn desktop_log_line_gives_the_page_on_screen() {
+        let line = "2026-11-23T18:35:59.692Z info [electron-message-handler] IAB_LIFECYCLE received browser sidebar owner sync browserTabId=null conversationId=x originWebContentsId=1 ownerRoutePath=/local/01a2-cb7e windowId=1\n";
+        assert_eq!(
+            parse_desktop_route(line),
+            Some((
+                parse_utc_timestamp_ms("2026-11-23T18:35:59.692Z").unwrap(),
+                "/local/01a2-cb7e".to_string()
+            ))
+        );
+        assert_eq!(
+            parse_desktop_route("2026-11-23T18:35:59.692Z info other"),
+            None
+        );
+    }
+
+    #[test]
+    #[ignore = "Requires Codex Desktop to have run on this machine"]
+    fn live_desktop_project() {
+        let path = home_dir().join(".codex").join(".codex-global-state.sqlite");
+        let rows = read_desktop_settings(&path).expect("settings database unreadable");
+        let known = desktop_projects().expect("no settings");
+        let route = desktop_route();
+        println!(
+            "{} rows, {} log files, route {:?}, project {:?}",
+            rows.len(),
+            desktop_log_files().len(),
+            route.as_ref().map(|(_, route)| route.get(..20)),
+            project_on_screen(route.as_ref().map(|(_, r)| r.as_str()), &known, |_| None)
+                .map(|(name, _)| name)
+        );
+        assert!(known.projects.is_object());
     }
 
     #[test]

@@ -1,5 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(not(windows))]
+compile_error!("Codex RPC supports Windows only.");
+
 mod daemon;
 mod monitor;
 #[cfg(windows)]
@@ -21,15 +24,12 @@ use std::{
     time::Duration,
 };
 
-/// Launch-agent label on macOS and notification identity on Windows.
+/// Notification identity on Windows.
 const APP_ID: &str = "io.github.inerthel-agi.codex-rich-presence";
 #[cfg(windows)]
 const RUN_REGISTRY_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 #[cfg(windows)]
 const RUN_REGISTRY_NAME: &str = "CodexRichPresence";
-/// Label used before 0.4.1; removed on the next startup toggle.
-#[cfg(target_os = "macos")]
-const MACOS_LEGACY_LAUNCH_AGENT_LABEL: &str = "eu.stealthylabs.codex-rich-presence";
 
 /// Structured view of the `state|model|usage|discord|plan|presence|resets|since`
 /// line written by the daemon.
@@ -160,10 +160,6 @@ fn open_codex() -> Result<(), String> {
                 .map_err(|err| err.to_string());
         }
     }
-    #[cfg(target_os = "macos")]
-    if Path::new("/Applications/Codex.app").is_dir() {
-        return open_with_shell("/Applications/Codex.app");
-    }
     open_with_shell("https://chatgpt.com/codex")
 }
 
@@ -209,25 +205,6 @@ fn open_codex_cli() -> Result<(), String> {
         }
         command.spawn().map(|_| ()).map_err(|err| err.to_string())
     }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = home;
-        std::process::Command::new("/usr/bin/osascript")
-            .args([
-                "-e",
-                r#"tell application "Terminal" to do script "codex""#,
-                "-e",
-                r#"tell application "Terminal" to activate"#,
-            ])
-            .spawn()
-            .map(|_| ())
-            .map_err(|err| err.to_string())
-    }
-    #[cfg(all(not(windows), not(target_os = "macos")))]
-    {
-        let _ = home;
-        Err("Opening a terminal is not supported on this platform".into())
-    }
 }
 
 /// Opens one of the app's fixed links; the interface only passes a key.
@@ -256,8 +233,6 @@ fn open_with_shell(target: &str) -> Result<(), String> {
         let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
         std::process::Command::new(Path::new(&root).join("explorer.exe"))
     };
-    #[cfg(not(windows))]
-    let mut command = std::process::Command::new("/usr/bin/open");
     command
         .arg(target)
         .spawn()
@@ -413,11 +388,6 @@ fn startup_menu_label() -> &'static str {
     "Start on Windows"
 }
 
-#[cfg(not(windows))]
-fn startup_menu_label() -> &'static str {
-    "Start at Login"
-}
-
 #[cfg(windows)]
 fn startup_enabled() -> bool {
     reg_command()
@@ -425,22 +395,6 @@ fn startup_enabled() -> bool {
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
-}
-
-#[cfg(target_os = "macos")]
-fn startup_enabled() -> bool {
-    [APP_ID, MACOS_LEGACY_LAUNCH_AGENT_LABEL]
-        .into_iter()
-        .any(|label| {
-            launch_agent_path(label)
-                .map(|path| path.exists())
-                .unwrap_or(false)
-        })
-}
-
-#[cfg(all(not(windows), not(target_os = "macos")))]
-fn startup_enabled() -> bool {
-    false
 }
 
 #[cfg(windows)]
@@ -472,53 +426,6 @@ fn set_startup_enabled(enabled: bool) -> Result<(), String> {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn set_startup_enabled(enabled: bool) -> Result<(), String> {
-    remove_launch_agent(&launch_agent_path(MACOS_LEGACY_LAUNCH_AGENT_LABEL)?)?;
-    let path = launch_agent_path(APP_ID)?;
-    if enabled {
-        let exe = std::env::current_exe().map_err(|err| err.to_string())?;
-        let exe = xml_escape(&exe.to_string_lossy());
-        let plist = format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>{APP_ID}</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>{exe}</string>
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-</dict>
-</plist>
-"#
-        );
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|err| err.to_string())?;
-        }
-        fs::write(path, plist).map_err(|err| err.to_string())
-    } else {
-        remove_launch_agent(&path)
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn remove_launch_agent(path: &Path) -> Result<(), String> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err.to_string()),
-    }
-}
-
-#[cfg(all(not(windows), not(target_os = "macos")))]
-fn set_startup_enabled(_enabled: bool) -> Result<(), String> {
-    Ok(())
-}
-
 #[cfg(windows)]
 fn reg_command() -> std::process::Command {
     use std::ffi::OsString;
@@ -532,33 +439,10 @@ fn reg_command() -> std::process::Command {
     command
 }
 
-#[cfg(target_os = "macos")]
-fn launch_agent_path(label: &str) -> Result<PathBuf, String> {
-    let home = std::env::var_os("HOME").ok_or_else(|| "HOME is not set".to_string())?;
-    Ok(Path::new(&home)
-        .join("Library")
-        .join("LaunchAgents")
-        .join(format!("{label}.plist")))
-}
-
-#[cfg(target_os = "macos")]
-fn xml_escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-}
-
 // ---------- Tray ----------
-// Windows draws its own panel (panel.rs); other platforms use Slint's tray icon with a native menu.
+// The tray icon and its panel live in panel.rs.
 
 thread_local! {
-    /// These live on the event-loop thread; other threads reach them through
-    /// `slint::invoke_from_event_loop`.
-    #[cfg(not(windows))]
-    static TRAY: RefCell<Option<Tray>> = const { RefCell::new(None) };
     static SETTINGS: RefCell<Option<SettingsUi>> = const { RefCell::new(None) };
 }
 
@@ -566,25 +450,11 @@ thread_local! {
 pub(crate) fn set_tray_icon(rgba: Vec<u8>, width: u32, height: u32) {
     #[cfg(windows)]
     panel::set_icon(&rgba, width, height);
-    #[cfg(not(windows))]
-    with_tray(|tray| {
-        tray.set_image(slint::Image::from_rgba8(
-            slint::SharedPixelBuffer::clone_from_slice(&rgba, width, height),
-        ))
-    });
 }
 
 pub(crate) fn set_tray_tip(tip: String) {
     #[cfg(windows)]
     panel::set_tip(&tip);
-    #[cfg(not(windows))]
-    with_tray(|tray| tray.set_tip(tip.into()));
-}
-
-/// The open panel refreshes itself; only the native menu needs this.
-#[cfg(not(windows))]
-pub(crate) fn set_tray_menu(model: view::TrayModel) {
-    with_tray(|tray| apply_tray(tray, &model));
 }
 
 /// Shows a tray action's effect right away instead of at the monitor's next tick.
@@ -594,11 +464,9 @@ fn tray_changed(settings: &RpcSettings) {
         let _ = settings;
         panel::refresh();
     }
-    #[cfg(not(windows))]
-    refresh_tray(settings);
 }
 
-// Actions shared by the native menu and the Windows panel.
+// Actions of the tray panel.
 fn pause(minutes: u64) {
     if let Ok(settings) = pause_presence(minutes) {
         tray_changed(&settings);
@@ -627,38 +495,6 @@ fn quit() {
     let _ = slint::quit_event_loop();
 }
 
-#[cfg(not(windows))]
-pub(crate) fn with_tray(update: impl FnOnce(&Tray)) {
-    TRAY.with(|slot| {
-        if let Some(tray) = slot.borrow().as_ref() {
-            update(tray);
-        }
-    });
-}
-
-#[cfg(not(windows))]
-pub(crate) fn apply_tray(tray: &Tray, model: &view::TrayModel) {
-    tray.set_headline(model.headline.as_str().into());
-    tray.set_facts(strings(&model.facts));
-    tray.set_paused(model.paused);
-    tray.set_pause_label(model.pause_label.as_str().into());
-    tray.set_hide_model(model.hide_model);
-    tray.set_update(model.update.as_str().into());
-    tray.set_discord(model.discord.as_str().into());
-    tray.set_can_reconnect(model.can_reconnect);
-}
-
-#[cfg(not(windows))]
-fn refresh_tray(settings: &RpcSettings) {
-    let model = view::tray_model(
-        &parse_status_line(&read_status_line()),
-        settings,
-        monitor::latest_version(),
-        now_ms(),
-    );
-    with_tray(|tray| apply_tray(tray, &model));
-}
-
 fn strings(values: &[String]) -> ModelRc<slint::SharedString> {
     ModelRc::new(VecModel::from(
         values
@@ -666,29 +502,6 @@ fn strings(values: &[String]) -> ModelRc<slint::SharedString> {
             .map(|value| value.as_str().into())
             .collect::<Vec<slint::SharedString>>(),
     ))
-}
-
-#[cfg(not(windows))]
-fn wire_tray(tray: &Tray) {
-    tray.on_open_settings(open_settings);
-    tray.on_pause(|minutes| pause(minutes.max(0) as u64));
-    tray.on_resume(resume);
-    tray.on_toggle_hide(|| {
-        let mut enabled = false;
-        with_tray(|tray| enabled = tray.get_hide_model());
-        set_hide_model(enabled);
-    });
-    tray.on_open_codex(|| {
-        let _ = open_codex();
-    });
-    tray.on_open_cli(|| {
-        let _ = open_codex_cli();
-    });
-    tray.on_open_update(|| {
-        let _ = open_link("release");
-    });
-    tray.on_reconnect(daemon::request_reconnect);
-    tray.on_quit(quit);
 }
 
 /// Colours, motion and fonts for a newly created window.
@@ -756,11 +569,6 @@ fn hide_caption(frame: &slint::winit_030::winit::window::Window) {
         SendMessageW(window, WM_SETICON, small, None);
         SendMessageW(window, WM_SETICON, small, Some(LPARAM(icon.0)));
     }
-}
-
-#[cfg(not(windows))]
-fn paint_frame(_window: &slint::Window, theme: &Theme) -> [slint::Color; 3] {
-    [theme.get_panel(), theme.get_text(), theme.get_frame()]
 }
 
 // ---------- Settings window ----------
@@ -1058,9 +866,6 @@ fn open_settings() {
 
 /// Cascadia Mono ships with Windows 11; older Windows has Consolas.
 fn mono_font() -> &'static str {
-    if !cfg!(windows) {
-        return "Menlo";
-    }
     let fonts = std::env::var_os("SystemRoot").map(|root| Path::new(&root).join("Fonts"));
     if fonts.is_some_and(|dir| dir.join("CascadiaMono.ttf").is_file()) {
         "Cascadia Mono"
@@ -1069,7 +874,7 @@ fn mono_font() -> &'static str {
     }
 }
 
-/// Follows Windows' "Animation effects" and macOS' "Reduce motion" settings.
+/// Follows Windows' "Animation effects" setting.
 #[cfg(windows)]
 fn animations_enabled() -> bool {
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -1085,14 +890,6 @@ fn animations_enabled() -> bool {
         )
     };
     read.is_err() || enabled != 0
-}
-
-#[cfg(not(windows))]
-fn animations_enabled() -> bool {
-    !std::process::Command::new("/usr/bin/defaults")
-        .args(["read", "com.apple.universalaccess", "reduceMotion"])
-        .output()
-        .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).trim() == "1")
 }
 
 fn report(result: Result<(), String>) {
@@ -1155,18 +952,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         panel::add_icon(&icon.0, icon.1, icon.2, "Codex RPC")?;
         Some(icon)
     };
-    #[cfg(not(windows))]
-    let base_icon = {
-        let tray = Tray::new()?;
-        wire_tray(&tray);
-        let icon = tray
-            .get_image()
-            .to_rgba8()
-            .map(|pixels| (pixels.as_bytes().to_vec(), pixels.width(), pixels.height()));
-        tray.show()?;
-        TRAY.with(|slot| *slot.borrow_mut() = Some(tray));
-        icon
-    };
     monitor::spawn(base_icon);
     // Normally the app starts quietly in the tray.
     if std::env::args().any(|arg| arg == "--settings") {
@@ -1190,8 +975,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     SETTINGS.with(|slot| slot.borrow_mut().take());
     #[cfg(windows)]
     panel::shutdown();
-    #[cfg(not(windows))]
-    TRAY.with(|slot| slot.borrow_mut().take());
     stop.store(true, Ordering::SeqCst);
     let _ = daemon.join();
     Ok(())

@@ -1,6 +1,6 @@
 [package]
 name = "codex_rich_presence_tray"
-version = "0.6.0"
+version = "0.6.1"
 description = "Codex RPC"
 authors = ["Inerthel"]
 license = "MIT"
@@ -31,7 +31,6 @@ slint = { version = "1.19", default-features = false, features = [
   "compat-1-2",
   "backend-winit",
   "renderer-software",
-  "system-tray",
   # Window options and focus events for the Windows tray panel (panel.rs).
   "unstable-winit-030",
 ] }

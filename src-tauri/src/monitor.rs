@@ -289,8 +289,6 @@ fn fetch_latest_version() -> Option<String> {
         command.creation_flags(0x08000000);
         command
     };
-    #[cfg(not(windows))]
-    let mut command = std::process::Command::new("/usr/bin/curl");
     let output = command
         .args([
             "-fsSL",
@@ -329,8 +327,6 @@ fn run(base_icon: Option<(Vec<u8>, u32, u32)>) {
     let started = crate::now_ms();
     let mut last_visual = None;
     let mut last_tooltip = String::new();
-    #[cfg(not(windows))]
-    let mut last_menu = None;
     let mut alerts: BTreeMap<String, AlertState> = BTreeMap::new();
     let mut history = load_history();
     let mut next_update_check = started + UPDATE_FIRST_CHECK_MS;
@@ -353,14 +349,6 @@ fn run(base_icon: Option<(Vec<u8>, u32, u32)>) {
         if tooltip != last_tooltip {
             last_tooltip = tooltip.clone();
             update_tray(move || crate::set_tray_tip(tooltip));
-        }
-        #[cfg(not(windows))]
-        {
-            let menu = crate::view::tray_model(&status, &settings, latest_version(), now);
-            if last_menu.as_ref() != Some(&menu) {
-                last_menu = Some(menu.clone());
-                update_tray(move || crate::set_tray_menu(menu));
-            }
         }
 
         for entry in &status.usage {

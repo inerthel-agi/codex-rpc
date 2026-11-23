@@ -19,7 +19,6 @@ All notable changes to Codex RPC are documented here.
 - "Hide model name" also hides the project name, and the Discord preview now shows it.
 - `npm run build` replaces the `tauri:build` scripts on both platforms and no longer needs `npm ci`. The Windows installer comes from `installer/windows.nsi`; its install folder, Start menu shortcut and uninstall key match Tauri's template, so it upgrades earlier installs in place. It also deletes the old web view caches (about 100 MB). The macOS bundle and DMG are assembled by `scripts/build.js`.
 - The version is read from `src-tauri/Cargo.toml` only; `package.json` no longer has one.
-- CI also lints and tests on macOS.
 - The README carries the "Made with Slint" badge required by Slint's royalty-free license.
 
 ### Removed

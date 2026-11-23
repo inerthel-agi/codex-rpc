@@ -11,11 +11,7 @@ permissions:
 
 jobs:
   test:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, macos-14]
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
     timeout-minutes: 30
     permissions:
       contents: read

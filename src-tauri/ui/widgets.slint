@@ -1,0 +1,422 @@
+// Shared tokens and widgets. Neutral, monochrome palette in the style of
+// OpenAI's apps; green is reserved for "connected".
+import { Palette } from "std-widgets.slint";
+
+export global Theme {
+    // dark | oled | system | light
+    in property <string> mode: "dark";
+    // Geist is embedded by app.slint. Set from Rust: the platform's monospace font,
+    // and whether the system allows animations.
+    out property <string> font: "Geist";
+    in property <string> mono: "Consolas";
+    in property <bool> motion: true;
+    out property <duration> fast: motion ? 140ms : 0ms;
+    out property <duration> slow: motion ? 320ms : 0ms;
+    // OLED is the dark palette on pure black: surfaces are set apart by their borders.
+    out property <bool> oled: mode == "oled";
+    out property <bool> dark: oled || mode == "dark" || (mode == "system" && Palette.color-scheme != ColorScheme.light);
+    out property <color> bg: oled ? #000000 : dark ? #171717 : #ffffff;
+    // Sidebar, cards, the tray panel and, on Windows 11, the title bar.
+    out property <color> panel: oled ? #000000 : dark ? #212121 : #f9f9f9;
+    // Raised surfaces: text fields and the selected segment. On OLED, the same grey
+    // as `hover` on black, so every selected item matches.
+    out property <color> input: oled ? #121212 : dark ? #2a2a2a : #ffffff;
+    out property <color> line: oled ? #ffffff24 : dark ? #ffffff1a : #0000001a;
+    // `line` drawn on `panel`, as one opaque colour for the window border.
+    out property <color> frame: oled ? #242424 : dark ? #383838 : #e0e0e0;
+    out property <color> text: dark ? #ececec : #0d0d0d;
+    // Light text on a dark background looks thinner than the same weight on white.
+    out property <int> weight: dark ? 450 : 400;
+    out property <color> muted: oled ? #b0b0b0 : dark ? #b4b4b4 : #5d5d5d;
+    out property <color> accent: dark ? #ececec : #0d0d0d;
+    out property <color> on-accent: oled ? #000000 : dark ? #171717 : #ffffff;
+    out property <color> track: oled ? #2a2a2a : dark ? #333333 : #e8e8e8;
+    out property <color> hover: oled ? #ffffff12 : dark ? #ffffff0f : #0000000d;
+    out property <color> press: oled ? #ffffff1f : dark ? #ffffff1c : #00000017;
+    out property <color> brand: dark ? #10a37f : #0f8f70;
+    out property <color> danger: dark ? #f87171 : #dc2626;
+    out property <color> warn: dark ? #f5a524 : #c2750a;
+    out property <color> discord: #5865f2;
+}
+
+// Stroked 24x24 icon drawn from SVG path commands.
+export component Icon inherits Path {
+    in property <brush> tint: Theme.muted;
+    in property <length> size: 15px;
+    width: size;
+    height: size;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    stroke: tint;
+    stroke-width: 1.3px;
+    fill: transparent;
+    animate stroke { duration: Theme.fast; }
+}
+
+// Click target that is also reachable with Tab and activated with Space or Enter.
+export component Pressable inherits FocusScope {
+    out property <bool> hovered: touch.has-hover && root.enabled;
+    out property <bool> pressed: touch.pressed && root.enabled;
+    out property <bool> focused: root.has-focus && root.enabled;
+    callback clicked();
+    key-pressed(event) => {
+        if (event.text == " " || event.text == Key.Return) {
+            root.clicked();
+            return accept;
+        }
+        return reject;
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// Fades its content in and lifts it a few pixels when it appears.
+export component Reveal inherits Rectangle {
+    in property <duration> delay: 0ms;
+    property <bool> shown;
+    opacity: shown ? 1 : 0;
+    animate opacity {
+        duration: Theme.slow;
+        easing: ease-out;
+    }
+    VerticalLayout {
+        padding-top: root.shown ? 0 : 8px;
+        padding-bottom: root.shown ? 8px : 0;
+        animate padding-top, padding-bottom {
+            duration: Theme.slow;
+            easing: ease-out;
+        }
+        @children
+    }
+
+    // Starts after the first frame so there is a hidden state to animate from.
+    Timer {
+        interval: max(root.delay, 16ms);
+        running: !root.shown;
+        triggered => {
+            root.shown = true;
+        }
+    }
+}
+
+export component Btn inherits Rectangle {
+    in property <string> text;
+    in property <bool> primary;
+    in property <bool> ghost;
+    in property <bool> enabled: true;
+    callback clicked();
+    height: 30px;
+    width: label.preferred-width + 28px;
+    border-radius: self.height / 2;
+    border-width: 1px;
+    border-color: press.focused ? Theme.muted : primary ? Theme.accent : ghost ? transparent : Theme.line;
+    background: primary ? Theme.accent : press.pressed ? Theme.press : press.hovered ? Theme.hover : transparent;
+    opacity: !enabled ? 0.4 : primary && press.pressed ? 0.75 : primary && press.hovered ? 0.85 : 1;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-action-default => {
+        root.clicked();
+    }
+    animate background, border-color, opacity { duration: Theme.fast; }
+    label := Text {
+        text: root.text;
+        color: primary ? Theme.on-accent : ghost && !press.hovered ? Theme.muted : Theme.text;
+        font-size: 13.5px;
+        font-weight: 500;
+        animate color { duration: Theme.fast; }
+    }
+
+    press := Pressable {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component Toggle inherits Rectangle {
+    in-out property <bool> checked;
+    in property <string> label;
+    callback toggled();
+    width: 30px;
+    height: 18px;
+    border-radius: 9px;
+    background: checked ? Theme.accent : press.hovered ? Theme.press : Theme.track;
+    border-width: press.focused ? 1px : 0;
+    border-color: Theme.muted;
+    accessible-role: switch;
+    accessible-label: root.label;
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    accessible-action-default => {
+        press.clicked();
+    }
+    animate background { duration: Theme.fast; }
+    // The knob stretches while pressed, then slides.
+    Rectangle {
+        y: 2px;
+        width: press.pressed ? 18px : 14px;
+        x: root.checked ? root.width - self.width - 2px : 2px;
+        height: 14px;
+        border-radius: 7px;
+        background: root.checked ? Theme.on-accent : Theme.muted;
+        animate x, width {
+            duration: Theme.fast;
+            easing: ease-out;
+        }
+        animate background { duration: Theme.fast; }
+    }
+
+    press := Pressable {
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled();
+        }
+    }
+}
+
+// Pill that is either a toggle (with a check mark) or a plain action.
+export component Chip inherits Rectangle {
+    in-out property <bool> checked;
+    in property <string> text;
+    in property <bool> enabled: true;
+    in property <bool> toggle: true;
+    callback clicked();
+    height: 28px;
+    width: row.preferred-width;
+    border-radius: 14px;
+    border-width: 1px;
+    border-color: press.focused ? Theme.muted : checked ? Theme.accent : Theme.line;
+    background: checked ? Theme.accent : press.pressed ? Theme.press : press.hovered ? Theme.hover : transparent;
+    opacity: enabled ? 1 : 0.4;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-checkable: root.toggle;
+    accessible-checked: root.checked;
+    accessible-action-default => {
+        press.clicked();
+    }
+    animate background, border-color, width { duration: Theme.fast; }
+    row := HorizontalLayout {
+        padding-left: 11px;
+        padding-right: 11px;
+        spacing: 5px;
+        if root.checked: VerticalLayout {
+            alignment: center;
+            Icon {
+                commands: "M20 6L9 17l-5-5";
+                size: 11px;
+                tint: Theme.on-accent;
+                stroke-width: 1.8px;
+            }
+        }
+        Text {
+            text: root.text;
+            color: root.checked ? Theme.on-accent : press.hovered ? Theme.text : Theme.muted;
+            font-size: 13.5px;
+            vertical-alignment: center;
+            animate color { duration: Theme.fast; }
+        }
+    }
+
+    press := Pressable {
+        enabled: root.enabled;
+        clicked => {
+            if (root.toggle) {
+                root.checked = !root.checked;
+            }
+            root.clicked();
+        }
+    }
+}
+
+export component Field inherits Rectangle {
+    in-out property <string> text <=> input.text;
+    in property <string> placeholder;
+    in property <string> label;
+    in property <string> family;
+    callback edited();
+    height: 32px;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.muted : hover.has-hover ? Theme.press : Theme.line;
+    background: Theme.input;
+    forward-focus: input;
+    animate border-color { duration: Theme.fast; }
+    hover := TouchArea {
+        mouse-cursor: MouseCursor.text;
+        clicked => {
+            input.focus();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        view := Rectangle {
+            clip: true;
+            if input.text == "": Text {
+                x: 0;
+                width: parent.width;
+                text: root.placeholder;
+                color: Theme.muted;
+                opacity: 0.7;
+                font-size: 13.5px;
+                font-family: root.family;
+                overflow: elide;
+            }
+            input := TextInput {
+                x: 0;
+                width: max(view.width, self.preferred-width);
+                height: view.height;
+                single-line: true;
+                font-size: 13.5px;
+                font-family: root.family;
+                color: Theme.text;
+                selection-background-color: Theme.muted;
+                selection-foreground-color: Theme.bg;
+                vertical-alignment: center;
+                accessible-label: root.label;
+                edited => {
+                    root.edited();
+                }
+                // Keep the caret visible when the text is wider than the field.
+                cursor-position-changed(position) => {
+                    if (position.x + self.x < 0) {
+                        self.x = -position.x;
+                    } else if (position.x + self.x > view.width - 2px) {
+                        self.x = view.width - position.x - 2px;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Options of equal width, with a thumb that slides to the selected one.
+export component Segmented inherits Rectangle {
+    in property <[string]> options;
+    in property <length> item-width: 62px;
+    in-out property <int> index;
+    callback selected(int);
+    height: 28px;
+    width: root.options.length * (root.item-width + 2px) + 4px;
+    border-radius: 14px;
+    border-width: 1px;
+    border-color: Theme.line;
+    background: Theme.bg;
+    if root.index >= 0: Rectangle {
+        x: 3px + root.index * (root.item-width + 2px);
+        y: 3px;
+        width: root.item-width;
+        height: parent.height - 6px;
+        border-radius: 11px;
+        background: Theme.input;
+        border-width: 1px;
+        border-color: Theme.line;
+        animate x {
+            duration: Theme.slow;
+            easing: ease-out;
+        }
+    }
+    for option[i] in root.options: Rectangle {
+        x: 3px + i * (root.item-width + 2px);
+        y: 3px;
+        width: root.item-width;
+        height: parent.height - 6px;
+        border-radius: 11px;
+        border-width: press.focused ? 1px : 0;
+        border-color: Theme.muted;
+        accessible-role: button;
+        accessible-label: option;
+        accessible-checkable: true;
+        accessible-checked: i == root.index;
+        accessible-action-default => {
+            press.clicked();
+        }
+        Text {
+            text: option;
+            color: i == root.index || press.hovered ? Theme.text : Theme.muted;
+            font-size: 13px;
+            animate color { duration: Theme.fast; }
+        }
+
+        press := Pressable {
+            clicked => {
+                root.index = i;
+                root.selected(i);
+            }
+        }
+    }
+}
+
+export component Group inherits Rectangle {
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: Theme.line;
+    background: Theme.panel;
+    VerticalLayout {
+        @children
+    }
+}
+
+export component GroupTitle inherits VerticalLayout {
+    in property <string> text;
+    padding-top: 22px;
+    padding-bottom: 8px;
+    Text {
+        text: root.text;
+        color: Theme.muted;
+        font-size: 13px;
+        font-weight: 500;
+    }
+}
+
+// One setting: title and hint on the left, the control on the right.
+export component Row inherits Rectangle {
+    in property <string> title;
+    in property <string> hint;
+    in property <bool> divider: true;
+    min-height: 52px;
+    if root.divider: Rectangle {
+        y: 0;
+        height: 1px;
+        background: Theme.line;
+    }
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        padding-top: 10px;
+        padding-bottom: 10px;
+        spacing: 16px;
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Text {
+                text: root.title;
+                color: Theme.text;
+                font-size: 14px;
+                overflow: elide;
+            }
+
+            // One line: a wrapped hint would not grow the row and would spill out of it.
+            if root.hint != "": Text {
+                text: root.hint;
+                color: Theme.muted;
+                font-size: 13px;
+                overflow: elide;
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 0;
+            @children
+        }
+    }
+}

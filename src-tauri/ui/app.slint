@@ -1,0 +1,1863 @@
+// Geist (SIL Open Font License 1.1, see fonts/OFL.txt), embedded so both platforms look the same.
+import "fonts/Geist.ttf";
+import { Theme, Icon, Pressable, Reveal, Btn, Toggle, Chip, Field, Segmented, Group, GroupTitle, Row } from "widgets.slint";
+
+export { Theme }
+
+export struct Limit {
+    figure: string,
+    caption: string,
+    // 0..1
+    percent: float,
+    // 0 fine, 1 low, 2 critical, 3 unavailable
+    level: int,
+    reset-in: string,
+    reset-date: string,
+}
+
+export struct Day {
+    name: string,
+    // 0..1 of the busiest day
+    share: float,
+    today: bool,
+}
+
+// Everything the settings window shows or edits; main.rs fills and reads it.
+export global App {
+    // Status
+    in property <bool> active;
+    in property <string> source-label: "Offline";
+    in property <string> plan-label;
+    in property <bool> has-plan;
+    in property <bool> pro;
+    in property <string> discord-status: "Not connected";
+    in property <[Limit]> limits;
+    in property <string> credits: "—";
+    in property <string> used-today: "—";
+    in property <string> used-week: "—";
+    in property <[Day]> days;
+    in property <bool> has-history;
+    // Discord preview
+    in property <string> dc-activity: "PLAYING";
+    in property <string> dc-details;
+    in property <string> dc-state;
+    in property <string> dc-time;
+    in property <string> dc-note;
+    in property <[string]> dc-buttons;
+    // Settings
+    in-out property <string> mode: "playing";
+    in-out property <bool> show-5h;
+    in-out property <bool> show-week;
+    in-out property <bool> show-effort;
+    in-out property <bool> show-fast;
+    in-out property <bool> show-credits;
+    in-out property <bool> show-plan;
+    in-out property <bool> hide-model;
+    in-out property <bool> show-elapsed;
+    in-out property <int> idle-minutes;
+    in-out property <string> template;
+    in-out property <string> label0;
+    in-out property <string> url0;
+    in-out property <string> label1;
+    in-out property <string> url1;
+    in-out property <bool> notify-low;
+    in-out property <bool> notify-reset;
+    in-out property <bool> check-updates;
+    // General
+    in-out property <bool> startup-enabled;
+    in property <string> startup-label: "Start on Windows";
+    in property <string> version;
+    in property <string> update-version;
+    in property <string> message: "Changes save automatically";
+    in property <bool> saved: true;
+    callback changed();
+    callback set-theme(string);
+    callback toggle-startup();
+    callback reconnect();
+    callback open-data();
+    callback open-link(string);
+    callback close();
+}
+
+component Heading inherits VerticalLayout {
+    in property <string> title;
+    in property <string> sub;
+    padding-bottom: 18px;
+    spacing: 2px;
+    Text {
+        text: root.title;
+        color: Theme.text;
+        font-size: 20px;
+        font-weight: 600;
+    }
+
+    Text {
+        text: root.sub;
+        color: Theme.muted;
+        font-size: 14px;
+    }
+}
+
+component Hero inherits VerticalLayout {
+    in property <Limit> limit;
+    in property <string> plan;
+    spacing: 8px;
+    HorizontalLayout {
+        spacing: 6px;
+        Text {
+            text: root.limit.figure;
+            color: Theme.text;
+            font-size: 27px;
+            font-weight: 600;
+        }
+
+        VerticalLayout {
+            alignment: end;
+            padding-bottom: 5px;
+            Text {
+                text: root.limit.caption;
+                color: Theme.muted;
+                font-size: 13px;
+            }
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+
+        if root.plan != "": VerticalLayout {
+            alignment: center;
+            Rectangle {
+                height: 20px;
+                width: plan-text.preferred-width + 18px;
+                border-radius: 10px;
+                border-width: 1px;
+                border-color: Theme.line;
+                plan-text := Text {
+                    text: root.plan;
+                    color: Theme.text;
+                    font-size: 12px;
+                    font-weight: 600;
+                }
+            }
+        }
+    }
+
+    bar := Rectangle {
+        // Fills from the left when the page opens, then follows each new reading.
+        property <bool> grown;
+        height: 6px;
+        border-radius: 3px;
+        background: Theme.track;
+        accessible-role: progress-indicator;
+        accessible-label: root.limit.caption;
+        accessible-value: root.limit.figure;
+        Rectangle {
+            x: 0;
+            width: bar.grown ? parent.width * root.limit.percent : 0;
+            border-radius: 3px;
+            background: root.limit.level == 2 ? Theme.danger : root.limit.level == 1 ? Theme.warn : Theme.accent;
+            animate width {
+                duration: Theme.motion ? 600ms : 0ms;
+                easing: ease-out;
+            }
+            animate background { duration: Theme.slow; }
+        }
+
+        Timer {
+            interval: 120ms;
+            running: !bar.grown;
+            triggered => {
+                bar.grown = true;
+            }
+        }
+    }
+
+    if root.limit.reset-in != "": HorizontalLayout {
+        Text {
+            text: root.limit.reset-in;
+            color: Theme.muted;
+            font-size: 12.5px;
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+
+        Text {
+            text: root.limit.reset-date;
+            color: Theme.muted;
+            font-size: 12.5px;
+        }
+    }
+}
+
+component Stat inherits Group {
+    in property <string> name;
+    in property <string> value;
+    // Sized by the row alone, so the three cards share it equally.
+    min-width: 0;
+    preferred-width: 0;
+    horizontal-stretch: 1;
+    VerticalLayout {
+        padding: 12px;
+        padding-left: 14px;
+        Text {
+            text: root.name;
+            color: Theme.muted;
+            font-size: 13px;
+        }
+
+        Text {
+            text: root.value;
+            color: Theme.text;
+            font-size: 21px;
+            font-weight: 600;
+        }
+    }
+}
+
+component Notice inherits Group {
+    in property <string> text;
+    in property <string> icon;
+    in property <brush> tint: Theme.muted;
+    HorizontalLayout {
+        padding: 12px;
+        padding-left: 14px;
+        spacing: 10px;
+        VerticalLayout {
+            alignment: center;
+            Icon {
+                commands: root.icon;
+                size: 16px;
+                tint: root.tint;
+            }
+        }
+
+        Text {
+            text: root.text;
+            color: Theme.muted;
+            font-size: 13.5px;
+            wrap: word-wrap;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+
+        VerticalLayout {
+            alignment: center;
+            @children
+        }
+    }
+}
+
+// The highlight of the current item is drawn by the sidebar, so it can slide between items.
+component NavItem inherits Rectangle {
+    in property <string> text;
+    in property <string> icon;
+    in property <bool> current;
+    callback clicked();
+    height: 34px;
+    border-radius: 8px;
+    background: !current && press.hovered ? Theme.hover : transparent;
+    border-width: press.focused ? 1px : 0;
+    border-color: Theme.muted;
+    animate background { duration: Theme.fast; }
+    accessible-role: tab;
+    accessible-label: root.text;
+    accessible-action-default => {
+        root.clicked();
+    }
+    HorizontalLayout {
+        padding-left: 10px;
+        spacing: 9px;
+        alignment: start;
+        VerticalLayout {
+            alignment: center;
+            Icon {
+                commands: root.icon;
+                tint: root.current || press.hovered ? Theme.text : Theme.muted;
+            }
+        }
+
+        Text {
+            text: root.text;
+            color: root.current || press.hovered ? Theme.text : Theme.muted;
+            font-size: 14px;
+            font-weight: Theme.weight + (root.current ? 100 : 0);
+            vertical-alignment: center;
+            animate color { duration: Theme.fast; }
+        }
+    }
+
+    press := Pressable {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+component ModeButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> checked;
+    callback clicked();
+    height: 38px;
+    border-radius: 10px;
+    border-width: checked ? 2px : 1px;
+    border-color: checked ? Theme.accent : press.focused ? Theme.muted : Theme.line;
+    background: press.pressed ? Theme.press : press.hovered ? Theme.hover : transparent;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    accessible-action-default => {
+        root.clicked();
+    }
+    animate background, border-color { duration: Theme.fast; }
+    Text {
+        text: root.text;
+        color: root.checked || press.hovered ? Theme.text : Theme.muted;
+        font-size: 13.5px;
+        font-weight: Theme.weight + (root.checked ? 100 : 0);
+        animate color { duration: Theme.fast; }
+    }
+
+    press := Pressable {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+component Token inherits Rectangle {
+    in property <string> text;
+    callback clicked();
+    height: 22px;
+    width: caption.preferred-width + 14px;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: press.focused ? Theme.muted : Theme.line;
+    background: press.pressed ? Theme.press : press.hovered ? Theme.hover : transparent;
+    accessible-role: button;
+    accessible-label: "Insert " + root.text;
+    accessible-action-default => {
+        root.clicked();
+    }
+    animate background { duration: Theme.fast; }
+    caption := Text {
+        text: root.text;
+        color: press.hovered ? Theme.text : Theme.muted;
+        // Smaller than the rest: all eight tokens must fit on one line.
+        font-size: 11px;
+        font-family: Theme.mono;
+        animate color { duration: Theme.fast; }
+    }
+
+    press := Pressable {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+component DiscordCard inherits Rectangle {
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: Theme.line;
+    background: Theme.panel;
+    accessible-role: groupbox;
+    accessible-label: "Discord preview";
+    VerticalLayout {
+        padding: 14px;
+        spacing: 10px;
+        HorizontalLayout {
+            Text {
+                text: App.dc-activity;
+                color: Theme.text;
+                font-size: 12px;
+                font-weight: 700;
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            Text {
+                text: "Live preview";
+                color: Theme.muted;
+                font-size: 12px;
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 12px;
+            Rectangle {
+                width: 68px;
+                height: 68px;
+                Image {
+                    x: 0;
+                    y: 0;
+                    width: 64px;
+                    height: 64px;
+                    source: @image-url("logo.png");
+                }
+
+                Rectangle {
+                    x: 46px;
+                    y: 46px;
+                    width: 22px;
+                    height: 22px;
+                    border-radius: 11px;
+                    border-width: 3px;
+                    border-color: Theme.panel;
+                    background: Theme.brand;
+                }
+            }
+
+            VerticalLayout {
+                alignment: center;
+                spacing: 1px;
+                horizontal-stretch: 1;
+                Text {
+                    text: "Codex";
+                    color: Theme.text;
+                    font-size: 14.5px;
+                    font-weight: 600;
+                }
+
+                Text {
+                    text: App.dc-details;
+                    color: Theme.muted;
+                    font-size: 13.5px;
+                    overflow: elide;
+                }
+
+                Text {
+                    text: App.dc-state;
+                    color: Theme.muted;
+                    font-size: 13.5px;
+                    overflow: elide;
+                }
+
+                if App.dc-time != "": Text {
+                    text: App.dc-time;
+                    color: Theme.brand;
+                    font-size: 13.5px;
+                }
+            }
+        }
+
+        if App.dc-buttons.length > 0: VerticalLayout {
+            spacing: 6px;
+            for label in App.dc-buttons: Rectangle {
+                height: 32px;
+                border-radius: 6px;
+                background: Theme.input;
+                border-width: 1px;
+                border-color: Theme.line;
+                Text {
+                    text: label;
+                    color: Theme.text;
+                    font-size: 13.5px;
+                    font-weight: 500;
+                }
+            }
+        }
+        if App.dc-note != "": Text {
+            text: App.dc-note;
+            color: Theme.muted;
+            font-size: 13px;
+            wrap: word-wrap;
+        }
+    }
+}
+
+component PresencePage inherits VerticalLayout {
+    Heading {
+        title: "Presence";
+        sub: "What your Discord profile shows while you use Codex.";
+    }
+
+    DiscordCard { }
+
+    GroupTitle {
+        text: "Activity type";
+    }
+
+    HorizontalLayout {
+        spacing: 6px;
+        for mode in [
+            { key: "playing", text: "Playing" },
+            { key: "watching", text: "Watching" },
+            { key: "listening", text: "Listening" },
+            { key: "competing", text: "Competing" },
+        ]: ModeButton {
+            text: mode.text;
+            checked: App.mode == mode.key;
+            clicked => {
+                App.mode = mode.key;
+                App.changed();
+            }
+        }
+    }
+
+    GroupTitle {
+        text: "Details";
+    }
+
+    Group {
+        VerticalLayout {
+            padding: 14px;
+            padding-top: 10px;
+            padding-bottom: 12px;
+            spacing: 8px;
+            VerticalLayout {
+                Text {
+                    text: "Show on profile";
+                    color: Theme.text;
+                    font-size: 14px;
+                }
+
+                Text {
+                    text: "What appears after the model on Discord.";
+                    color: Theme.muted;
+                    font-size: 13px;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 6px;
+                alignment: start;
+                if !App.pro: Chip {
+                    text: "5 hours";
+                    checked <=> App.show-5h;
+                    clicked => {
+                        App.changed();
+                    }
+                }
+                Chip {
+                    text: "Week";
+                    checked <=> App.show-week;
+                    clicked => {
+                        App.changed();
+                    }
+                }
+
+                Chip {
+                    text: "Effort";
+                    checked <=> App.show-effort;
+                    clicked => {
+                        App.changed();
+                    }
+                }
+
+                Chip {
+                    text: "Fast mode";
+                    checked <=> App.show-fast;
+                    clicked => {
+                        App.changed();
+                    }
+                }
+
+                Chip {
+                    text: "Credits";
+                    checked <=> App.show-credits;
+                    clicked => {
+                        App.changed();
+                    }
+                }
+
+                Chip {
+                    text: "Plan";
+                    enabled: App.has-plan;
+                    checked <=> App.show-plan;
+                    clicked => {
+                        App.changed();
+                    }
+                }
+            }
+
+            if !App.has-plan: Text {
+                text: "Plan is available when Codex reports a ChatGPT subscription. API-key sign-ins have no plan to show.";
+                color: Theme.muted;
+                font-size: 13px;
+                wrap: word-wrap;
+            }
+        }
+
+        Row {
+            title: "Hide model name";
+            hint: "Shows “Coding” instead of the model, effort and project.";
+            Toggle {
+                label: "Hide model name";
+                checked <=> App.hide-model;
+                toggled => {
+                    App.changed();
+                }
+            }
+        }
+
+        Row {
+            title: "Elapsed timer";
+            hint: "Show how long the session has been running.";
+            Toggle {
+                label: "Elapsed timer";
+                checked <=> App.show-elapsed;
+                toggled => {
+                    App.changed();
+                }
+            }
+        }
+
+        Row {
+            title: "Clear when idle";
+            hint: "After no Codex activity.";
+            Segmented {
+                options: ["Never", "15 min", "30 min", "1 h"];
+                index: App.idle-minutes == 15 ? 1 : App.idle-minutes == 30 ? 2 : App.idle-minutes == 60 ? 3 : App.idle-minutes == 0 ? 0 : -1;
+                selected(i) => {
+                    App.idle-minutes = i == 1 ? 15 : i == 2 ? 30 : i == 3 ? 60 : 0;
+                    App.changed();
+                }
+            }
+        }
+    }
+
+    GroupTitle {
+        text: "Custom status line (optional)";
+    }
+
+    Group {
+        VerticalLayout {
+            padding: 14px;
+            padding-top: 10px;
+            padding-bottom: 10px;
+            spacing: 8px;
+            template := Field {
+                label: "Custom status line";
+                placeholder: "Automatic — e.g. {model} · {week} left";
+                family: Theme.mono;
+                text <=> App.template;
+                edited => {
+                    App.changed();
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 4px;
+                alignment: start;
+                for token in ["{model}", "{effort}", "{speed}", "{5h}", "{week}", "{credits}", "{plan}", "{project}"]: Token {
+                    text: token;
+                    clicked => {
+                        App.template = App.template == "" ? token : App.template + " " + token;
+                        App.changed();
+                        template.focus();
+                    }
+                }
+            }
+        }
+    }
+}
+
+component UsagePage inherits VerticalLayout {
+    Heading {
+        title: "Usage";
+        sub: "Your Codex limits. Updated automatically.";
+    }
+
+    Group {
+        VerticalLayout {
+            padding: 16px;
+            spacing: 18px;
+            for limit[i] in App.limits: Hero {
+                limit: limit;
+                plan: i == 0 ? App.plan-label : "";
+            }
+            if App.limits.length == 0: Text {
+                text: "Waiting for Codex usage…";
+                color: Theme.muted;
+                font-size: 13.5px;
+            }
+        }
+    }
+
+    HorizontalLayout {
+        padding-top: 10px;
+        spacing: 10px;
+        Stat {
+            name: "Credits";
+            value: App.credits;
+        }
+
+        Stat {
+            name: "Used today";
+            value: App.used-today;
+        }
+
+        Stat {
+            name: "Last 7 days";
+            value: App.used-week;
+        }
+    }
+
+    GroupTitle {
+        text: "Weekly limit used per day";
+    }
+
+    Group {
+        accessible-role: groupbox;
+        accessible-label: "Weekly limit used per day";
+        VerticalLayout {
+            padding: 14px;
+            padding-bottom: 12px;
+            spacing: 4px;
+            chart := HorizontalLayout {
+                // Bars grow from the baseline when the page opens, one after the other.
+                property <bool> grown;
+                height: 72px;
+                spacing: 10px;
+                for day[i] in App.days: Rectangle {
+                    Rectangle {
+                        y: parent.height - self.height;
+                        height: max(2px, chart.grown ? parent.height * day.share : 0);
+                        border-radius: 3px;
+                        background: day.today ? Theme.accent : Theme.track;
+                        animate height {
+                            duration: Theme.slow;
+                            delay: Theme.motion ? i * 30ms : 0ms;
+                            easing: ease-out;
+                        }
+                    }
+                }
+
+                Timer {
+                    interval: 120ms;
+                    running: !chart.grown;
+                    triggered => {
+                        chart.grown = true;
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 10px;
+                for day in App.days: Text {
+                    text: day.name;
+                    color: Theme.muted;
+                    font-size: 11.5px;
+                    horizontal-alignment: center;
+                }
+            }
+
+            if !App.has-history: Text {
+                text: "History starts when Codex RPC first sees your usage.";
+                color: Theme.muted;
+                font-size: 13px;
+            }
+        }
+    }
+
+    GroupTitle {
+        text: "Alerts";
+    }
+
+    Group {
+        Row {
+            divider: false;
+            title: "Notify when low";
+            hint: "A notification at 25% and at 10% left.";
+            Toggle {
+                label: "Notify when low";
+                checked <=> App.notify-low;
+                toggled => {
+                    App.changed();
+                }
+            }
+        }
+
+        Row {
+            title: "Notify on reset";
+            hint: "Tells you when a limit is back to 100%.";
+            Toggle {
+                label: "Notify on reset";
+                checked <=> App.notify-reset;
+                toggled => {
+                    App.changed();
+                }
+            }
+        }
+    }
+}
+
+component LinkRow inherits Rectangle {
+    in-out property <string> label <=> label-field.text;
+    in-out property <string> url <=> url-field.text;
+    in property <string> name;
+    in property <bool> divider: true;
+    height: 52px;
+    if root.divider: Rectangle {
+        y: 0;
+        height: 1px;
+        background: Theme.line;
+    }
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 8px;
+        spacing: 8px;
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            label-field := Field {
+                label: root.name + " label";
+                placeholder: "Label";
+                edited => {
+                    App.changed();
+                }
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 2;
+            url-field := Field {
+                label: root.name + " URL";
+                placeholder: "https://…";
+                edited => {
+                    App.changed();
+                }
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            Btn {
+                text: "Remove";
+                ghost: true;
+                clicked => {
+                    root.label = "";
+                    root.url = "";
+                    App.changed();
+                }
+            }
+        }
+    }
+}
+
+component ButtonsPage inherits VerticalLayout {
+    function preset(label: string, url: string) {
+        if (App.label0 == "") {
+            App.label0 = label;
+            App.url0 = url;
+        } else {
+            App.label1 = label;
+            App.url1 = url;
+        }
+        App.changed();
+    }
+
+    Heading {
+        title: "Profile buttons";
+        sub: "Up to two links under your presence.";
+    }
+
+    if App.mode != "watching": VerticalLayout {
+        padding-bottom: 10px;
+        Notice {
+            icon: "M6 11h12a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2zM8 11V7a4 4 0 0 1 8 0v4";
+            text: "Discord only shows buttons in Watching mode.";
+            Btn {
+                text: "Switch to Watching";
+                clicked => {
+                    App.mode = "watching";
+                    App.changed();
+                }
+            }
+        }
+    }
+    Notice {
+        icon: "M3 12a9 9 0 1 0 18 0a9 9 0 1 0-18 0M12 11v5M12 8v.01";
+        tint: Theme.discord;
+        text: "Requires Discord Nitro. Without Nitro, other people will not see these buttons on your profile.";
+    }
+
+    GroupTitle {
+        text: "Links";
+    }
+
+    Group {
+        LinkRow {
+            divider: false;
+            name: "Button 1";
+            label <=> App.label0;
+            url <=> App.url0;
+        }
+
+        LinkRow {
+            name: "Button 2";
+            label <=> App.label1;
+            url <=> App.url1;
+        }
+    }
+
+    GroupTitle {
+        text: "Quick presets";
+    }
+
+    HorizontalLayout {
+        spacing: 6px;
+        alignment: start;
+        Chip {
+            toggle: false;
+            text: "Open Codex";
+            clicked => {
+                root.preset("Open Codex", "https://chatgpt.com/codex");
+            }
+        }
+
+        Chip {
+            toggle: false;
+            text: "Usage page";
+            clicked => {
+                root.preset("Usage", "https://chatgpt.com/codex/settings/analytics");
+            }
+        }
+
+        Chip {
+            toggle: false;
+            text: "GitHub repo";
+            clicked => {
+                root.preset("GitHub repo", "https://github.com/inerthel-agi/codex-rpc");
+            }
+        }
+    }
+}
+
+component GeneralPage inherits VerticalLayout {
+    Heading {
+        title: "General";
+        sub: "App behavior and appearance.";
+    }
+
+    Group {
+        Row {
+            divider: false;
+            title: "Theme";
+            Segmented {
+                options: ["Dark", "OLED", "System", "Light"];
+                index: Theme.mode == "dark" ? 0 : Theme.mode == "oled" ? 1 : Theme.mode == "system" ? 2 : 3;
+                selected(i) => {
+                    App.set-theme(i == 0 ? "dark" : i == 1 ? "oled" : i == 2 ? "system" : "light");
+                }
+            }
+        }
+
+        Row {
+            title: App.startup-label;
+            hint: "Launch quietly in the tray when you sign in.";
+            Toggle {
+                label: App.startup-label;
+                // Two-way, so the switch keeps following what main.rs reads back from the system.
+                checked <=> App.startup-enabled;
+                toggled => {
+                    App.toggle-startup();
+                }
+            }
+        }
+
+        Row {
+            title: "Check for updates";
+            hint: "Looks at GitHub releases once a day.";
+            Toggle {
+                label: "Check for updates";
+                checked <=> App.check-updates;
+                toggled => {
+                    App.changed();
+                }
+            }
+        }
+    }
+
+    GroupTitle {
+        text: "Troubleshooting";
+    }
+
+    Group {
+        Row {
+            divider: false;
+            title: "Discord";
+            hint: App.discord-status;
+            Btn {
+                text: "Reconnect";
+                clicked => {
+                    App.reconnect();
+                }
+            }
+        }
+
+        Row {
+            title: "Data folder";
+            hint: "Settings, status and usage history.";
+            Btn {
+                text: "Open folder";
+                clicked => {
+                    App.open-data();
+                }
+            }
+        }
+    }
+
+    GroupTitle {
+        text: "About";
+    }
+
+    Group {
+        Row {
+            divider: false;
+            title: "Codex RPC";
+            hint: "Version " + App.version + " · MIT license";
+            Btn {
+                text: "GitHub repo";
+                clicked => {
+                    App.open-link("repo");
+                }
+            }
+        }
+
+        Row {
+            title: "Made by Inerthel";
+            hint: "More projects and contact on GitHub.";
+            Btn {
+                text: "GitHub profile";
+                clicked => {
+                    App.open-link("profile");
+                }
+            }
+        }
+
+        Row {
+            title: "Feedback";
+            hint: "Report a bug or suggest a feature.";
+            Btn {
+                text: "Open an issue";
+                clicked => {
+                    App.open-link("issues");
+                }
+            }
+        }
+
+        // Slint's royalty-free license is met by the badge in the README; this row credits it here too.
+        Row {
+            title: "Made with Slint";
+            hint: "The toolkit that draws this window.";
+            Btn {
+                text: "slint.dev";
+                clicked => {
+                    App.open-link("slint");
+                }
+            }
+        }
+    }
+}
+
+export component SettingsWindow inherits Window {
+    in-out property <int> page;
+    title: "Codex RPC";
+    icon: @image-url("logo.png");
+    preferred-width: 760px;
+    preferred-height: 680px;
+    min-width: 720px;
+    min-height: 560px;
+    background: Theme.bg;
+    default-font-family: Theme.font;
+    default-font-size: 14px;
+    default-font-weight: Theme.weight;
+    forward-focus: keys;
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                App.close();
+                return accept;
+            }
+            return reject;
+        }
+        VerticalLayout {
+            HorizontalLayout {
+                Rectangle {
+                    width: 184px;
+                    background: Theme.panel;
+                    Rectangle {
+                        x: parent.width - 1px;
+                        width: 1px;
+                        background: Theme.line;
+                    }
+
+                    VerticalLayout {
+                        padding: 10px;
+                        padding-top: 14px;
+                        padding-bottom: 14px;
+                        spacing: 2px;
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-bottom: 16px;
+                            spacing: 10px;
+                            alignment: start;
+                            Image {
+                                width: 28px;
+                                height: 28px;
+                                source: @image-url("logo-small.png");
+                            }
+
+                            VerticalLayout {
+                                alignment: center;
+                                Text {
+                                    text: "Codex RPC";
+                                    color: Theme.text;
+                                    font-size: 14px;
+                                    font-weight: 600;
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 5px;
+                                    alignment: start;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Rectangle {
+                                            width: 6px;
+                                            height: 6px;
+                                            border-radius: 3px;
+                                            background: App.active ? Theme.brand : Theme.track;
+                                        }
+                                    }
+
+                                    Text {
+                                        text: App.source-label;
+                                        color: Theme.muted;
+                                        font-size: 12.5px;
+                                    }
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            height: nav.preferred-height;
+                            // Slides behind the current item; items are 34px tall, 2px apart.
+                            Rectangle {
+                                y: root.page * 36px;
+                                height: 34px;
+                                border-radius: 8px;
+                                background: Theme.hover;
+                                animate y {
+                                    duration: Theme.slow;
+                                    easing: ease-out;
+                                }
+                            }
+
+                            nav := VerticalLayout {
+                                spacing: 2px;
+                                for item[i] in [
+                                    { text: "Presence", icon: "M8 8a4 4 0 1 0 8 0a4 4 0 1 0-8 0M4 21a8 8 0 0 1 16 0" },
+                                    { text: "Usage", icon: "M3 3v18h18M7 15l4-4 3 3 5-6" },
+                                    { text: "Profile buttons", icon: "M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7" },
+                                    { text: "General", icon: "M9 12a3 3 0 1 0 6 0a3 3 0 1 0-6 0M3 12a9 9 0 1 0 18 0a9 9 0 1 0-18 0" },
+                                ]: NavItem {
+                                    text: item.text;
+                                    icon: item.icon;
+                                    current: root.page == i;
+                                    clicked => {
+                                        root.page = i;
+                                        scroll.content-y = 0;
+                                    }
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            vertical-stretch: 1;
+                        }
+
+                        VerticalLayout {
+                            padding-left: 10px;
+                            spacing: 2px;
+                            Text {
+                                text: "Codex RPC v" + App.version;
+                                color: Theme.muted;
+                                font-size: 12.5px;
+                            }
+
+                            if App.update-version != "": Rectangle {
+                                height: update-text.preferred-height;
+                                accessible-role: button;
+                                accessible-label: update-text.text;
+                                accessible-action-default => {
+                                    App.open-link("release");
+                                }
+                                update-text := Text {
+                                    x: 0;
+                                    text: "v" + App.update-version + " available";
+                                    color: Theme.brand;
+                                    font-size: 12.5px;
+                                }
+
+                                Pressable {
+                                    clicked => {
+                                        App.open-link("release");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                    scroll := Flickable {
+                        content-width: self.width;
+                        VerticalLayout {
+                            padding: 28px;
+                            padding-top: 22px;
+                            alignment: start;
+                            if root.page == 0: Reveal {
+                                PresencePage { }
+                            }
+                            if root.page == 1: Reveal {
+                                UsagePage { }
+                            }
+                            if root.page == 2: Reveal {
+                                ButtonsPage { }
+                            }
+                            if root.page == 3: Reveal {
+                                GeneralPage { }
+                            }
+                        }
+                    }
+
+                    // Scroll position indicator; the wheel and touchpad do the scrolling.
+                    if scroll.content-height > scroll.height: Rectangle {
+                        x: parent.width - 8px;
+                        y: -scroll.content-y / scroll.content-height * scroll.height;
+                        width: 5px;
+                        height: scroll.height / scroll.content-height * scroll.height;
+                        border-radius: 2.5px;
+                        background: Theme.track;
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 50px;
+                Rectangle {
+                    y: 0;
+                    height: 1px;
+                    background: Theme.line;
+                }
+
+                HorizontalLayout {
+                    padding-left: 28px;
+                    padding-right: 20px;
+                    spacing: 8px;
+                    VerticalLayout {
+                        alignment: center;
+                        Icon {
+                            commands: "M20 6L9 17l-5-5";
+                            size: 14px;
+                            tint: App.saved ? Theme.brand : transparent;
+                            stroke-width: 2px;
+                        }
+                    }
+
+                    Text {
+                        text: App.message;
+                        color: Theme.muted;
+                        font-size: 13px;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+                        Btn {
+                            text: "Done";
+                            primary: true;
+                            clicked => {
+                                App.close();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+export struct Fact {
+    label: string,
+    value: string,
+}
+
+component Pill inherits Rectangle {
+    in property <string> text;
+    // 0 off, 1 live, 2 paused or idle
+    in property <int> kind;
+    property <color> tint: kind == 1 ? Theme.brand : kind == 2 ? Theme.warn : Theme.muted;
+    height: 22px;
+    width: row.preferred-width;
+    border-radius: 11px;
+    background: kind == 0 ? Theme.hover : tint.with-alpha(0.14);
+    animate background { duration: Theme.fast; }
+    row := HorizontalLayout {
+        padding-left: 9px;
+        padding-right: 9px;
+        spacing: 6px;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 6px;
+                height: 6px;
+                border-radius: 3px;
+                background: root.tint;
+            }
+        }
+
+        Text {
+            text: root.text;
+            color: root.tint;
+            font-size: 12px;
+            font-weight: 500;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component Separator inherits VerticalLayout {
+    padding-top: 6px;
+    padding-bottom: 6px;
+    padding-left: 8px;
+    padding-right: 8px;
+    Rectangle {
+        height: 1px;
+        background: Theme.line;
+    }
+}
+
+// One row of the tray panel: icon, label, and an optional shortcut or switch.
+component PanelItem inherits Rectangle {
+    in property <string> text;
+    in property <string> icon;
+    in property <brush> icon-tint: Theme.muted;
+    in property <string> shortcut;
+    in property <bool> switch;
+    in property <bool> checked;
+    in property <bool> danger;
+    callback clicked();
+    height: 34px;
+    border-radius: 10px;
+    background: press.pressed ? Theme.press : press.hovered ? Theme.hover : transparent;
+    border-width: press.focused ? 1px : 0;
+    border-color: Theme.muted;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-checkable: root.switch;
+    accessible-checked: root.checked;
+    accessible-action-default => {
+        root.clicked();
+    }
+    animate background { duration: Theme.fast; }
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 10px;
+        VerticalLayout {
+            alignment: center;
+            Icon {
+                commands: root.icon;
+                tint: root.danger && press.hovered ? Theme.danger : root.icon-tint;
+            }
+        }
+
+        Text {
+            text: root.text;
+            color: root.danger && press.hovered ? Theme.danger : Theme.text;
+            font-size: 14px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+            animate color { duration: Theme.fast; }
+        }
+
+        if root.shortcut != "": Text {
+            text: root.shortcut;
+            color: Theme.muted;
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+        if root.switch: VerticalLayout {
+            alignment: center;
+            // Drawn only: the whole row takes the click.
+            Toggle {
+                checked: root.checked;
+            }
+        }
+    }
+
+    press := Pressable {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// Opened by a right-click on the tray icon (Windows); panel.rs fills it, sizes it and places it.
+export component TrayPanel inherits Window {
+    in property <string> model-line;
+    in property <string> pill: "Offline";
+    in property <int> pill-kind;
+    in property <bool> has-hero;
+    in property <Limit> hero;
+    in property <string> plan;
+    in property <string> banner;
+    // 1 low, 2 critical
+    in property <int> banner-level;
+    in property <[Fact]> facts;
+    in property <bool> paused;
+    in property <string> pause-label: "Pause Discord presence";
+    in property <bool> hide-model;
+    in property <string> update;
+    in property <string> discord-pre;
+    in property <string> discord-user;
+    in property <string> discord-post;
+    in property <string> discord-action;
+    out property <length> wanted-height: content.preferred-height;
+    callback toggle-pause();
+    callback pause(int);
+    callback toggle-hide();
+    callback open-codex();
+    callback open-cli();
+    callback open-settings();
+    callback open-update();
+    callback discord-clicked();
+    callback quit();
+    callback dismiss();
+    title: "Codex RPC menu";
+    no-frame: true;
+    always-on-top: true;
+    background: Theme.panel;
+    default-font-family: Theme.font;
+    default-font-size: 14px;
+    default-font-weight: Theme.weight;
+    forward-focus: keys;
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.dismiss();
+                return accept;
+            }
+            if (event.modifiers.control && event.text == ",") {
+                root.open-settings();
+                return accept;
+            }
+            return reject;
+        }
+        content := VerticalLayout {
+            padding: 6px;
+            alignment: start;
+            Reveal {
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    padding-top: 8px;
+                    padding-bottom: 10px;
+                    spacing: 10px;
+                    Image {
+                        width: 28px;
+                        height: 28px;
+                        source: @image-url("logo-small.png");
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+                        horizontal-stretch: 1;
+                        Text {
+                            text: "Codex RPC";
+                            color: Theme.text;
+                            font-size: 14px;
+                            font-weight: 600;
+                        }
+
+                        Text {
+                            text: root.model-line;
+                            color: Theme.muted;
+                            font-size: 12px;
+                            overflow: elide;
+                        }
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+                        Pill {
+                            text: root.pill;
+                            kind: root.pill-kind;
+                        }
+                    }
+                }
+
+                if root.banner != "": VerticalLayout {
+                    padding-left: 4px;
+                    padding-right: 4px;
+                    padding-bottom: 8px;
+                    Rectangle {
+                        border-radius: 10px;
+                        background: (root.banner-level == 2 ? Theme.danger : Theme.warn).with-alpha(0.14);
+                        HorizontalLayout {
+                            padding: 8px;
+                            padding-left: 10px;
+                            spacing: 8px;
+                            VerticalLayout {
+                                alignment: center;
+                                Icon {
+                                    commands: "M12 9v4M12 17h.01M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z";
+                                    size: 14px;
+                                    tint: root.banner-level == 2 ? Theme.danger : Theme.warn;
+                                    stroke-width: 1.8px;
+                                }
+                            }
+
+                            Text {
+                                text: root.banner;
+                                color: Theme.text;
+                                font-size: 13px;
+                                overflow: elide;
+                                horizontal-stretch: 1;
+                            }
+                        }
+                    }
+                }
+                VerticalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    padding-top: 2px;
+                    padding-bottom: 8px;
+                    if root.has-hero: Hero {
+                        limit: root.hero;
+                        plan: root.plan;
+                    }
+                    if !root.has-hero: Text {
+                        text: "Waiting for Codex usage…";
+                        color: Theme.muted;
+                        font-size: 13.5px;
+                    }
+                }
+
+                if root.facts.length > 0: HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    padding-bottom: 8px;
+                    alignment: space-between;
+                    for fact in root.facts: HorizontalLayout {
+                        spacing: 4px;
+                        Text {
+                            text: fact.label;
+                            color: Theme.muted;
+                            font-size: 13px;
+                        }
+
+                        Text {
+                            text: fact.value;
+                            color: Theme.text;
+                            font-size: 13px;
+                            font-weight: 500;
+                        }
+                    }
+                }
+                Separator { }
+
+                PanelItem {
+                    text: root.pause-label;
+                    icon: "M6 5h4v14H6zM14 5h4v14h-4z";
+                    switch: true;
+                    checked: root.paused;
+                    clicked => {
+                        root.toggle-pause();
+                    }
+                }
+
+                if !root.paused: HorizontalLayout {
+                    padding-left: 35px;
+                    padding-bottom: 6px;
+                    spacing: 4px;
+                    alignment: start;
+                    for option in [
+                        { text: "30 min", minutes: 30 },
+                        { text: "1 h", minutes: 60 },
+                        { text: "Until I resume", minutes: 0 },
+                    ]: Chip {
+                        toggle: false;
+                        text: option.text;
+                        clicked => {
+                            root.pause(option.minutes);
+                        }
+                    }
+                }
+                PanelItem {
+                    text: "Hide model name";
+                    icon: "M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12zM9 12a3 3 0 1 0 6 0a3 3 0 1 0-6 0";
+                    switch: true;
+                    checked: root.hide-model;
+                    clicked => {
+                        root.toggle-hide();
+                    }
+                }
+
+                Separator { }
+
+                PanelItem {
+                    text: "Open Codex";
+                    icon: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14L21 3";
+                    clicked => {
+                        root.open-codex();
+                    }
+                }
+
+                PanelItem {
+                    text: "Open Codex CLI";
+                    icon: "M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM6 9l3 3-3 3M12 15h5";
+                    clicked => {
+                        root.open-cli();
+                    }
+                }
+
+                PanelItem {
+                    text: "Settings…";
+                    shortcut: "Ctrl ,";
+                    icon: "M9 12a3 3 0 1 0 6 0a3 3 0 1 0-6 0M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z";
+                    clicked => {
+                        root.open-settings();
+                    }
+                }
+
+                if root.update != "": PanelItem {
+                    text: "Update available · v" + root.update;
+                    icon: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3";
+                    icon-tint: Theme.brand;
+                    clicked => {
+                        root.open-update();
+                    }
+                }
+                PanelItem {
+                    text: "Quit";
+                    icon: "M18.36 6.64a9 9 0 1 1-12.73 0M12 2v10";
+                    danger: true;
+                    clicked => {
+                        root.quit();
+                    }
+                }
+
+                VerticalLayout {
+                    padding-top: 4px;
+                    Rectangle {
+                        border-radius: 10px;
+                        background: Theme.hover;
+                        HorizontalLayout {
+                            padding: 8px;
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            spacing: 8px;
+                            VerticalLayout {
+                                alignment: center;
+                                Path {
+                                    width: 16px;
+                                    height: 16px;
+                                    viewbox-width: 24;
+                                    viewbox-height: 24;
+                                    fill: Theme.discord;
+                                    commands: "M20.3 4.4A19.8 19.8 0 0 0 15.4 3l-.6 1.3a18.4 18.4 0 0 0-5.6 0L8.6 3a19.7 19.7 0 0 0-4.9 1.5C.6 9.1-.3 13.6.1 18.1a19.9 19.9 0 0 0 6 3l1.3-2.1-2-1 .5-.4a14.2 14.2 0 0 0 12.2 0l.5.4-2 1 1.3 2.1a19.8 19.8 0 0 0 6-3c.5-5.2-.9-9.7-3.6-13.7zM8 15.3c-1.2 0-2.2-1.1-2.2-2.4S6.8 10.5 8 10.5s2.2 1.1 2.2 2.4-1 2.4-2.2 2.4zm8 0c-1.2 0-2.2-1.1-2.2-2.4s1-2.4 2.2-2.4 2.2 1.1 2.2 2.4-1 2.4-2.2 2.4z";
+                                }
+                            }
+
+                            HorizontalLayout {
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: root.discord-pre;
+                                    color: Theme.muted;
+                                    font-size: 13px;
+                                    vertical-alignment: center;
+                                }
+
+                                Text {
+                                    text: root.discord-user;
+                                    color: Theme.text;
+                                    font-size: 13px;
+                                    font-weight: 500;
+                                    vertical-alignment: center;
+                                }
+
+                                Text {
+                                    text: root.discord-post;
+                                    color: Theme.muted;
+                                    font-size: 13px;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+                            }
+
+                            if root.discord-action != "": Rectangle {
+                                width: action-text.preferred-width + 8px;
+                                border-radius: 6px;
+                                background: action-press.hovered ? Theme.press : transparent;
+                                border-width: action-press.focused ? 1px : 0;
+                                border-color: Theme.muted;
+                                accessible-role: button;
+                                accessible-label: root.discord-action;
+                                accessible-action-default => {
+                                    root.discord-clicked();
+                                }
+                                animate background { duration: Theme.fast; }
+                                action-text := Text {
+                                    text: root.discord-action;
+                                    color: Theme.text;
+                                    font-size: 13px;
+                                    font-weight: 500;
+                                }
+
+                                action-press := Pressable {
+                                    clicked => {
+                                        root.discord-clicked();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The tray icon and its native menu on macOS; main.rs and monitor.rs keep it up to date.
+export component Tray inherits SystemTrayIcon {
+    in property <image> image: @image-url("tray.png");
+    in property <string> tip: "Codex RPC";
+    in property <string> headline: "Codex RPC";
+    in property <[string]> facts;
+    in property <bool> paused;
+    in property <string> pause-label;
+    in-out property <bool> hide-model;
+    in property <string> update;
+    in property <string> discord;
+    in property <bool> can-reconnect;
+    callback open-settings();
+    callback pause(int);
+    callback resume();
+    callback toggle-hide();
+    callback open-codex();
+    callback open-cli();
+    callback open-update();
+    callback reconnect();
+    callback quit();
+    icon: root.image;
+    tooltip: root.tip;
+    clicked => {
+        root.open-settings();
+    }
+    Menu {
+        MenuItem {
+            title: root.headline;
+            enabled: false;
+        }
+
+        for fact in root.facts: MenuItem {
+            title: fact;
+            enabled: false;
+        }
+        MenuSeparator { }
+
+        if !root.paused: Menu {
+            title: "Pause Discord presence";
+            MenuItem {
+                title: "For 30 minutes";
+                activated => {
+                    root.pause(30);
+                }
+            }
+
+            MenuItem {
+                title: "For 1 hour";
+                activated => {
+                    root.pause(60);
+                }
+            }
+
+            MenuItem {
+                title: "Until I resume";
+                activated => {
+                    root.pause(0);
+                }
+            }
+        }
+        if root.paused: MenuItem {
+            title: root.pause-label;
+            activated => {
+                root.resume();
+            }
+        }
+        MenuItem {
+            title: "Hide model name";
+            checkable: true;
+            checked <=> root.hide-model;
+            activated => {
+                root.toggle-hide();
+            }
+        }
+
+        MenuSeparator { }
+
+        MenuItem {
+            title: "Open Codex";
+            activated => {
+                root.open-codex();
+            }
+        }
+
+        MenuItem {
+            title: "Open Codex CLI";
+            activated => {
+                root.open-cli();
+            }
+        }
+
+        MenuItem {
+            title: "Settings…";
+            activated => {
+                root.open-settings();
+            }
+        }
+
+        if root.update != "": MenuItem {
+            title: "Update available · v" + root.update;
+            activated => {
+                root.open-update();
+            }
+        }
+        MenuSeparator { }
+
+        MenuItem {
+            title: root.discord;
+            enabled: false;
+        }
+
+        if root.can-reconnect: MenuItem {
+            title: "Reconnect Discord";
+            activated => {
+                root.reconnect();
+            }
+        }
+        MenuSeparator { }
+
+        MenuItem {
+            title: "Quit";
+            activated => {
+                root.quit();
+            }
+        }
+    }
+}

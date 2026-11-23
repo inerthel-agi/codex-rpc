@@ -3,12 +3,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fs, path::PathBuf, sync::Mutex, time::Duration};
-use tauri::{image::Image, AppHandle, Manager};
-use tauri_plugin_notification::NotificationExt;
 
 use crate::{AppStatus, UsageEntry};
 
-pub(crate) const TRAY_ID: &str = "main";
 const TICK: Duration = Duration::from_secs(3);
 const HOUR_MS: u64 = 3_600_000;
 const HISTORY_HOURS: u64 = 8 * 24;
@@ -16,10 +13,17 @@ const UPDATE_FIRST_CHECK_MS: u64 = 30_000;
 const UPDATE_INTERVAL_MS: u64 = 24 * HOUR_MS;
 const RELEASES_API: &str = "https://api.github.com/repos/inerthel-agi/codex-rpc/releases/latest";
 
-/// State the Tauri commands read back from the monitor thread.
-#[derive(Default)]
-pub(crate) struct Shared {
-    pub(crate) latest_version: Mutex<Option<String>>,
+/// Newer release found by the update check, if any.
+static LATEST_VERSION: Mutex<Option<String>> = Mutex::new(None);
+
+pub(crate) fn latest_version() -> Option<String> {
+    LATEST_VERSION.lock().ok().and_then(|slot| slot.clone())
+}
+
+fn set_latest_version(version: Option<String>) {
+    if let Ok(mut slot) = LATEST_VERSION.lock() {
+        *slot = version;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -311,17 +315,22 @@ fn fetch_latest_version() -> Option<String> {
     valid.then(|| tag.to_string())
 }
 
-pub(crate) fn spawn(app: AppHandle) {
-    std::thread::spawn(move || run(app));
+/// `base_icon` is the tray icon as RGBA pixels with its width and height.
+pub(crate) fn spawn(base_icon: Option<(Vec<u8>, u32, u32)>) {
+    std::thread::spawn(move || run(base_icon));
 }
 
-fn run(app: AppHandle) {
-    let base_icon = app
-        .default_window_icon()
-        .map(|icon| (icon.rgba().to_vec(), icon.width(), icon.height()));
+/// The tray lives on the event-loop thread; this hands it an update from here.
+fn update_tray(update: impl FnOnce() + Send + 'static) {
+    let _ = slint::invoke_from_event_loop(update);
+}
+
+fn run(base_icon: Option<(Vec<u8>, u32, u32)>) {
     let started = crate::now_ms();
     let mut last_visual = None;
     let mut last_tooltip = String::new();
+    #[cfg(not(windows))]
+    let mut last_menu = None;
     let mut alerts: BTreeMap<String, AlertState> = BTreeMap::new();
     let mut history = load_history();
     let mut next_update_check = started + UPDATE_FIRST_CHECK_MS;
@@ -333,17 +342,24 @@ fn run(app: AppHandle) {
 
         let visual = tray_visual(&status);
         let tooltip = tray_tooltip(&status);
-        if let Some(tray) = app.tray_by_id(TRAY_ID) {
-            if last_visual != Some(visual) {
-                if let Some((rgba, width, height)) = &base_icon {
-                    let icon = badge_icon(rgba, *width, *height, visual);
-                    let _ = tray.set_icon(Some(Image::new_owned(icon, *width, *height)));
-                }
-                last_visual = Some(visual);
+        if last_visual != Some(visual) {
+            if let Some((rgba, width, height)) = &base_icon {
+                let (icon, width, height) =
+                    (badge_icon(rgba, *width, *height, visual), *width, *height);
+                update_tray(move || crate::set_tray_icon(icon, width, height));
             }
-            if tooltip != last_tooltip {
-                let _ = tray.set_tooltip(Some(tooltip.as_str()));
-                last_tooltip = tooltip;
+            last_visual = Some(visual);
+        }
+        if tooltip != last_tooltip {
+            last_tooltip = tooltip.clone();
+            update_tray(move || crate::set_tray_tip(tooltip));
+        }
+        #[cfg(not(windows))]
+        {
+            let menu = crate::view::tray_model(&status, &settings, latest_version(), now);
+            if last_menu.as_ref() != Some(&menu) {
+                last_menu = Some(menu.clone());
+                update_tray(move || crate::set_tray_menu(menu));
             }
         }
 
@@ -359,7 +375,7 @@ fn run(app: AppHandle) {
             };
             if let (true, Some(alert)) = (wanted, alert) {
                 let (title, body) = alert_text(alert, entry, now);
-                let _ = app.notification().builder().title(title).body(body).show();
+                crate::notify(&title, &body);
             }
             if entry.label == "Week" && history.record(now, entry.percent) {
                 save_history(&history);
@@ -367,19 +383,15 @@ fn run(app: AppHandle) {
         }
 
         if !settings.check_updates {
-            if let Ok(mut slot) = app.state::<Shared>().latest_version.lock() {
-                *slot = None;
-            }
+            set_latest_version(None);
         } else if now >= next_update_check {
             next_update_check = now + UPDATE_INTERVAL_MS;
             // curl can take up to 10 s; keep the tray icon and alerts responsive meanwhile.
-            let app = app.clone();
-            std::thread::spawn(move || {
-                let latest = fetch_latest_version()
-                    .filter(|latest| is_newer(latest, env!("CARGO_PKG_VERSION")));
-                if let Ok(mut slot) = app.state::<Shared>().latest_version.lock() {
-                    *slot = latest;
-                }
+            std::thread::spawn(|| {
+                set_latest_version(
+                    fetch_latest_version()
+                        .filter(|latest| is_newer(latest, env!("CARGO_PKG_VERSION"))),
+                );
             });
         }
 

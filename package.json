@@ -1,22 +1,12 @@
 {
   "name": "codex-rich-presence",
-  "version": "0.5.1",
   "private": true,
   "description": "Codex RPC",
   "scripts": {
-    "tauri": "tauri",
-    "tauri:dev": "tauri dev",
-    "tauri:build": "node scripts/build-tauri.js",
-    "tauri:build:macos": "node scripts/build-tauri-macos.js",
-    "tauri:build:windows": "tauri build --bundles nsis && node scripts/export-tauri-binary.js",
-    "test": "cargo test --manifest-path src-tauri/Cargo.toml",
-    "dist": "npm run tauri:build",
-    "dist:windows": "npm run tauri:build:windows",
-    "dist:macos": "npm run tauri:build:macos"
+    "dev": "cargo run --manifest-path src-tauri/Cargo.toml -- --settings",
+    "build": "node scripts/build.js",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml"
   },
   "author": "Inerthel",
-  "license": "MIT",
-  "devDependencies": {
-    "@tauri-apps/cli": "^2.10.1"
-  }
+  "license": "MIT"
 }

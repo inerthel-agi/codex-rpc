@@ -33,13 +33,9 @@ jobs:
       - uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b
         with:
           node-version: 22
-          cache: npm
-
-      - name: Install dependencies
-        run: npm ci
 
       - name: Build macOS app
-        run: npm run tauri:build:macos
+        run: npm run build
 
       - name: Upload release assets
         env:

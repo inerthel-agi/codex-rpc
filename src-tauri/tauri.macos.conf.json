@@ -1,6 +1,0 @@
-{
-  "bundle": {
-    "targets": ["app", "dmg"],
-    "icon": ["../assets/icon.png", "../assets/icon.icns"]
-  }
-}

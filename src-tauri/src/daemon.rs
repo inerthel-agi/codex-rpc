@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::{
     collections::HashMap,
     fs::{self, File},
-    io::{Read, Seek, SeekFrom, Write},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -480,6 +480,12 @@ fn classify_process(process: &ProcessSnapshot) -> PresenceState {
         .to_ascii_lowercase();
     let parent_name = command_basename(&parent);
 
+    // The app-server daemon is a background service the CLI starts and shares with
+    // Desktop. It outlives both, so it says nothing about which one is open.
+    if exe_unix.contains("/.codex/packages/app-server-daemon/") {
+        return PresenceState::Idle;
+    }
+
     if exe_unix.contains("/openai/codex/")
         || exe_unix.contains("/programs/codex/")
         || exe_unix.contains("/program files/codex/")
@@ -819,7 +825,7 @@ fn build_activity(result: &DetectionResult, settings: &RpcSettings) -> Option<Va
         "type": activity_type,
         "created_at": now_ms(),
         "instance": false,
-        "details": build_details(result, &mode),
+        "details": build_details(result, &mode, settings.hide_model),
         "state": build_state_line(result, settings),
         "assets": {
             "large_image": "codex_logo",
@@ -840,7 +846,8 @@ fn build_activity(result: &DetectionResult, settings: &RpcSettings) -> Option<Va
     Some(activity)
 }
 
-fn build_details(result: &DetectionResult, mode: &str) -> String {
+/// "Using Codex - <project>"; "Hide model name" also hides the project.
+fn build_details(result: &DetectionResult, mode: &str, hide_project: bool) -> String {
     let base = match (result.state, mode) {
         (PresenceState::Cli, "watching") => "Watching Codex CLI",
         (PresenceState::App, "watching") => "Watching Codex",
@@ -853,6 +860,7 @@ fn build_details(result: &DetectionResult, mode: &str) -> String {
     if let Some(repo) = result
         .session
         .as_ref()
+        .filter(|_| !hide_project)
         .and_then(|session| sanitize_field(Some(&session.repo_name), 32))
     {
         let candidate = format!("{base} - {repo}");
@@ -1142,8 +1150,14 @@ fn format_status_line(
         .started_at_ms
         .map(|ms| ms.to_string())
         .unwrap_or_default();
+    // The settings window applies "Hide model name" itself, for its live preview.
+    let project = result
+        .session
+        .as_ref()
+        .and_then(|session| sanitize_field(Some(&session.repo_name.replace('|', "/")), 32))
+        .unwrap_or_default();
     format!(
-        "{state}|{model_line}|{usage_line}|{discord}|{plan}|{}|{resets}|{since}",
+        "{state}|{model_line}|{usage_line}|{discord}|{plan}|{}|{resets}|{since}|{project}",
         presence.as_str()
     )
 }
@@ -1333,20 +1347,148 @@ fn extract_project_section_path(line: &str) -> Option<String> {
     None
 }
 
-/// Returns the latest turn_context config plus the moment that turn started
-/// (line timestamp when present, otherwise the rollout file's mtime).
-fn read_turn_context_config() -> Option<(CodexConfig, u64)> {
-    for rollout in find_recent_rollout_files(&sessions_dir(), 24 * 60 * 60 * 1000) {
-        let Some(lines) = read_tail_lines(&rollout.0, 1024 * 1024) else {
-            continue;
-        };
-        for line in lines.iter().rev() {
-            if let Some((cfg, ts)) = parse_turn_context_line(line) {
-                return Some((cfg, ts.unwrap_or(rollout.1)));
+const ROLLOUT_MAX_AGE_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// What a rollout file has told us so far. Rollouts are append-only, so each
+/// poll only parses the lines added since the previous one.
+#[derive(Debug, Clone, Default)]
+struct RolloutScan {
+    scanned: u64,
+    /// Sub-agent threads (workers, reviews) run their own model, not the one
+    /// the user picked.
+    subagent: bool,
+    cwd: Option<String>,
+    turn: Option<(CodexConfig, Option<u64>)>,
+    /// Timestamp of the last complete line: when Codex last wrote to the thread.
+    last_line_ms: Option<u64>,
+}
+
+impl RolloutScan {
+    fn apply_line(&mut self, line: &[u8]) {
+        let text = String::from_utf8_lossy(line);
+        if self.scanned == 0 {
+            if let Ok(meta) = serde_json::from_str::<Value>(&text) {
+                self.subagent = is_subagent_meta(&meta);
+                self.cwd = meta["payload"]["cwd"]
+                    .as_str()
+                    .filter(|_| meta["type"].as_str() == Some("session_meta"))
+                    .map(|cwd| strip_windows_long_prefix(cwd).to_string());
+            }
+        } else if text.contains("\"turn_context\"") {
+            if let Some(turn) = parse_turn_context_line(&text) {
+                self.turn = Some(turn);
+            }
+        }
+        // Every rollout line starts with `{"timestamp":"<UTC time>",`.
+        if let Some(ms) = text
+            .strip_prefix("{\"timestamp\":\"")
+            .and_then(|rest| rest.split('"').next())
+            .and_then(parse_utc_timestamp_ms)
+        {
+            self.last_line_ms = Some(ms);
+        }
+        self.scanned += line.len() as u64;
+    }
+}
+
+static ROLLOUT_SCANS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, RolloutScan>>> =
+    std::sync::OnceLock::new();
+
+fn scan_rollout(path: &Path) -> Option<RolloutScan> {
+    let scans = ROLLOUT_SCANS.get_or_init(Default::default);
+    let mut scan = scans.lock().ok()?.get(path).cloned().unwrap_or_default();
+    let mut file = File::open(path).ok()?;
+    if file.metadata().ok()?.len() < scan.scanned {
+        scan = RolloutScan::default();
+    }
+    file.seek(SeekFrom::Start(scan.scanned)).ok()?;
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    // A line without its newline is still being written; the next poll reads it.
+    while reader.read_until(b'\n', &mut line).ok()? > 0 && line.ends_with(b"\n") {
+        scan.apply_line(&line);
+        line.clear();
+    }
+    scans.lock().ok()?.insert(path.to_path_buf(), scan.clone());
+    Some(scan)
+}
+
+fn is_subagent_meta(meta: &Value) -> bool {
+    let payload = &meta["payload"];
+    meta["type"].as_str() == Some("session_meta")
+        && (payload["thread_source"].as_str() == Some("subagent")
+            || payload["source"].get("subagent").is_some())
+}
+
+/// Every rollout active in the last day, scanned up to its last complete line,
+/// with the time Codex last wrote to it. Windows can keep a rollout's mtime at
+/// its creation while Codex holds it open, so activity comes from the line
+/// timestamps, and a thread already seen stays listed while its lines are recent.
+fn recent_scans(root: &Path) -> Vec<(PathBuf, RolloutScan, u64)> {
+    let now = now_ms();
+    let known = ROLLOUT_SCANS.get_or_init(Default::default);
+    let mut files = find_recent_rollout_files(root, ROLLOUT_MAX_AGE_MS);
+    if let Ok(known) = known.lock() {
+        for (path, scan) in known.iter() {
+            let recent = scan
+                .last_line_ms
+                .is_some_and(|ms| now.saturating_sub(ms) <= ROLLOUT_MAX_AGE_MS);
+            if recent && path.starts_with(root) && !files.iter().any(|(file, _)| file == path) {
+                files.push((path.clone(), 0));
             }
         }
     }
-    None
+    let scans: Vec<_> = files
+        .into_iter()
+        .filter_map(|(path, mtime)| {
+            let scan = scan_rollout(&path)?;
+            let active = scan.last_line_ms.unwrap_or(0).max(mtime);
+            Some((path, scan, active))
+        })
+        .collect();
+    // Forget threads that went quiet or were deleted, so the cache cannot grow for ever.
+    if let Ok(mut known) = known.lock() {
+        known.retain(|path, _| {
+            !path.starts_with(root) || scans.iter().any(|(scanned, ..)| scanned == path)
+        });
+    }
+    scans
+}
+
+/// Returns the latest turn_context config plus the moment that turn started
+/// (line timestamp when present, otherwise the rollout file's mtime).
+fn read_turn_context_config() -> Option<(CodexConfig, u64)> {
+    latest_turn_context(&sessions_dir())
+}
+
+/// The newest turn of a thread the user drives. Whole files are scanned
+/// because one long turn pushes its turn_context far from the end of the file.
+fn latest_turn_context(root: &Path) -> Option<(CodexConfig, u64)> {
+    recent_scans(root)
+        .into_iter()
+        .filter(|(_, scan, _)| !scan.subagent)
+        .filter_map(|(_, scan, active)| {
+            let (cfg, ts) = scan.turn?;
+            Some((cfg, ts.unwrap_or(active)))
+        })
+        .max_by_key(|(_, ts)| *ts)
+}
+
+/// The project of the thread the user last worked in, and the last time any
+/// thread (sub-agents included) wrote something, for "Clear when idle".
+fn current_session(root: &Path) -> Option<CodexSession> {
+    let scans = recent_scans(root);
+    let last_activity_ms = scans.iter().map(|(.., active)| *active).max()?;
+    let (_, scan, _) = scans
+        .iter()
+        .filter(|(_, scan, _)| scan.cwd.is_some())
+        .max_by_key(|(_, scan, active)| (!scan.subagent, *active))?;
+    let cwd = scan.cwd.clone()?;
+    Some(CodexSession {
+        repo_name: basename_safe(&cwd),
+        cwd,
+        last_activity_ms,
+    })
 }
 
 fn parse_turn_context_line(line: &str) -> Option<(CodexConfig, Option<u64>)> {
@@ -1409,21 +1551,7 @@ fn parse_utc_timestamp_ms(ts: &str) -> Option<u64> {
 }
 
 fn read_codex_session() -> Option<CodexSession> {
-    let latest = find_latest_rollout_file(&sessions_dir(), 24 * 60 * 60 * 1000)?;
-    let first_line = read_first_line(&latest.0)?;
-    let obj: Value = serde_json::from_str(first_line.trim()).ok()?;
-    if obj.get("type").and_then(Value::as_str) != Some("session_meta") {
-        return None;
-    }
-    let cwd = obj
-        .get("payload")
-        .and_then(|payload| payload.get("cwd"))
-        .and_then(Value::as_str)?;
-    Some(CodexSession {
-        cwd: strip_windows_long_prefix(cwd).to_string(),
-        repo_name: basename_safe(strip_windows_long_prefix(cwd)),
-        last_activity_ms: latest.1,
-    })
+    current_session(&sessions_dir())
 }
 
 fn read_codex_usage() -> Option<CodexUsage> {
@@ -1792,49 +1920,6 @@ fn parse_credits(value: Option<&Value>) -> Option<f64> {
         .and_then(|value| value.as_f64().or_else(|| value.as_str()?.parse().ok()))
 }
 
-fn find_latest_rollout_file(root: &Path, max_age_ms: u64) -> Option<(PathBuf, u64)> {
-    fn walk(dir: &Path, now: u64, max_age_ms: u64, best: &mut Option<(PathBuf, u64)>) {
-        let entries = match fs::read_dir(dir) {
-            Ok(entries) => entries,
-            Err(_) => return,
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let file_type = match entry.file_type() {
-                Ok(file_type) => file_type,
-                Err(_) => continue,
-            };
-            if file_type.is_dir() {
-                walk(&path, now, max_age_ms, best);
-                continue;
-            }
-            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if !file_type.is_file() || !name.starts_with("rollout-") || !name.ends_with(".jsonl") {
-                continue;
-            }
-            let Some(mtime) = modified_ms(&path) else {
-                continue;
-            };
-            if now.saturating_sub(mtime) > max_age_ms {
-                continue;
-            }
-            if best
-                .as_ref()
-                .map(|(_, best_time)| mtime > *best_time)
-                .unwrap_or(true)
-            {
-                *best = Some((path, mtime));
-            }
-        }
-    }
-
-    let mut best = None;
-    walk(root, now_ms(), max_age_ms, &mut best);
-    best
-}
-
 fn find_recent_rollout_files(root: &Path, max_age_ms: u64) -> Vec<(PathBuf, u64)> {
     fn walk(dir: &Path, now: u64, max_age_ms: u64, files: &mut Vec<(PathBuf, u64)>) {
         let entries = match fs::read_dir(dir) {
@@ -1870,14 +1955,6 @@ fn find_recent_rollout_files(root: &Path, max_age_ms: u64) -> Vec<(PathBuf, u64)
     walk(root, now_ms(), max_age_ms, &mut files);
     files.sort_by_key(|file| std::cmp::Reverse(file.1));
     files
-}
-
-fn read_first_line(path: &Path) -> Option<String> {
-    let mut file = File::open(path).ok()?;
-    let mut buf = vec![0; 8192];
-    let len = file.read(&mut buf).ok()?;
-    let text = String::from_utf8_lossy(&buf[..len]);
-    Some(text.split('\n').next().unwrap_or_default().to_string())
 }
 
 fn read_tail_lines(path: &Path, max_bytes: u64) -> Option<Vec<String>> {
@@ -2449,6 +2526,13 @@ mod tests {
         process.executable_path =
             Some(r"C:\Users\test\AppData\Local\OpenAI\Codex\bin\version\codex.exe".into());
         assert_eq!(classify_process(&process), PresenceState::App);
+        // The shared daemon, whose launcher has already exited, is not a Desktop session.
+        process.parent_name = None;
+        process.executable_path = Some(
+            r"\\?\C:\Users\test\.codex\packages\app-server-daemon\releases\0.169.0\bin\codex.exe"
+                .into(),
+        );
+        assert_eq!(classify_process(&process), PresenceState::Idle);
     }
 
     #[test]
@@ -2574,6 +2658,141 @@ service_tier = "fast"
     }
 
     #[test]
+    #[ignore = "Reads the local ~/.codex sessions"]
+    fn live_codex_config() {
+        let session = read_codex_session();
+        println!("session={session:?}");
+        println!(
+            "{:?}",
+            read_codex_config(session.as_ref().map(|s| s.cwd.as_str()))
+        );
+    }
+
+    #[test]
+    fn subagent_rollout_does_not_override_the_main_thread_model() {
+        let dir = std::env::temp_dir().join(format!(
+            "codex-rpc-rollouts-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let main = dir.join("rollout-main.jsonl");
+        // One long turn: the turn_context sits megabytes before the end.
+        fs::write(
+            &main,
+            format!(
+                "{}\n{}\n{}\n",
+                r#"{"type":"session_meta","payload":{"thread_source":"user","source":"vscode"}}"#,
+                r#"{"timestamp":"2026-11-22T21:43:28.387Z","type":"turn_context","payload":{"model":"gpt-6.2-astra","effort":"max"}}"#,
+                "x".repeat(2 * 1024 * 1024)
+            ),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("rollout-worker.jsonl"),
+            concat!(
+                r#"{"type":"session_meta","payload":{"thread_source":"subagent","source":{"subagent":{"thread_spawn":{"agent_role":"luna_worker"}}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-11-22T22:03:53.335Z","type":"turn_context","payload":{"model":"gpt-5.6-luna","effort":"medium"}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let (cfg, _) = latest_turn_context(&dir).unwrap();
+        assert_eq!(cfg.model.as_deref(), Some("gpt-6.2-astra"));
+        assert_eq!(cfg.effort.as_deref(), Some("max"));
+
+        // A new turn is picked up; a half-written line is left for the next poll.
+        let mut file = fs::OpenOptions::new().append(true).open(&main).unwrap();
+        file.write_all(
+            concat!(
+                r#"{"timestamp":"2026-11-22T22:10:00.000Z","type":"turn_context","payload":{"model":"gpt-6.2-astra","effort":"high"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-11-22T22:11:00.000Z","type":"turn_context","payload":{"model":"gpt-5.5","eff"#
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let (cfg, ts) = latest_turn_context(&dir).unwrap();
+        assert_eq!(cfg.model.as_deref(), Some("gpt-6.2-astra"));
+        assert_eq!(cfg.effort.as_deref(), Some("high"));
+        assert_eq!(
+            ts,
+            parse_utc_timestamp_ms("2026-11-22T22:10:00.000Z").unwrap()
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn review_and_worker_threads_count_as_subagents() {
+        assert!(is_subagent_meta(
+            &json!({"type":"session_meta","payload":{"source":{"subagent":"review"}}})
+        ));
+        assert!(!is_subagent_meta(
+            &json!({"type":"session_meta","payload":{"source":"vscode","thread_source":"user"}})
+        ));
+    }
+
+    #[test]
+    fn session_follows_the_last_active_user_thread() {
+        let dir = std::env::temp_dir().join(format!(
+            "codex-rpc-sessions-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        // Line times lie after the files' mtime, as on Windows while Codex holds them open.
+        let thread = |name: &str, source: &str, cwd: &str, at: &str| {
+            let meta = json!({
+                "type": "session_meta",
+                "payload": {"cwd": cwd, "thread_source": source, "base_instructions": "i".repeat(28_000)},
+            });
+            let line = format!(r#"{{"timestamp":"{at}","type":"event_msg","payload":{{}}}}"#);
+            fs::write(dir.join(name), format!("{meta}\n{line}\n")).unwrap();
+        };
+        thread(
+            "rollout-a.jsonl",
+            "user",
+            "C:/code/project-a",
+            "2099-01-01T10:05:00.000Z",
+        );
+        thread(
+            "rollout-b.jsonl",
+            "user",
+            "C:/code/project-b",
+            "2099-01-01T10:00:00.000Z",
+        );
+        thread(
+            "rollout-w.jsonl",
+            "subagent",
+            "C:/code/project-w",
+            "2099-01-01T10:09:00.000Z",
+        );
+
+        let session = current_session(&dir).unwrap();
+        assert_eq!(session.repo_name, "project-a");
+        // A worker writing still counts as activity.
+        assert_eq!(
+            session.last_activity_ms,
+            parse_utc_timestamp_ms("2099-01-01T10:09:00.000Z").unwrap()
+        );
+
+        // A deleted thread drops out of the results and of the cache.
+        fs::remove_file(dir.join("rollout-w.jsonl")).unwrap();
+        let session = current_session(&dir).unwrap();
+        assert_eq!(
+            session.last_activity_ms,
+            parse_utc_timestamp_ms("2099-01-01T10:05:00.000Z").unwrap()
+        );
+        let cached = ROLLOUT_SCANS.get().unwrap().lock().unwrap();
+        assert!(!cached.contains_key(&dir.join("rollout-w.jsonl")));
+        assert!(cached.contains_key(&dir.join("rollout-a.jsonl")));
+        drop(cached);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn usage_label_follows_the_reported_window() {
         let limit = |window_minutes| LimitSnapshot {
             used_percent: 11.0,
@@ -2643,6 +2862,19 @@ service_tier = "fast"
         assert_eq!(
             build_state_line(&active_result(), &settings),
             "Coding - week 97%"
+        );
+        // The project goes with the model, and the status line keeps it for the preview.
+        assert_eq!(
+            build_details(&active_result(), "playing", false),
+            "Using Codex - codex-rpc"
+        );
+        assert_eq!(
+            build_details(&active_result(), "playing", true),
+            "Using Codex"
+        );
+        assert!(
+            format_status_line(&active_result(), &settings, None, Presence::Live)
+                .ends_with("|codex-rpc")
         );
     }
 

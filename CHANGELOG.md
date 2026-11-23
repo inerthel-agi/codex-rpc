@@ -2,6 +2,40 @@
 
 All notable changes to Codex RPC are documented here.
 
+## [0.6.0] - 2026-11-23
+
+### Changed
+
+- The interface is drawn by Slint's software renderer instead of a web view (Tauri and WebView2 are gone). Measured on Windows 11: about 2 MB of private memory in the tray and 6 MB with the settings window open, down from about 110 MB across eight processes.
+- The settings window is created when you open it and freed when you close it. It uses the system title bar. On Windows the title bar is empty: the name and the logo are in the sidebar, and still in the taskbar and Alt+Tab.
+- Right-clicking the tray icon on Windows opens a panel drawn like the settings window: model and status, the most constrained limit with a bar, pause with 30 min / 1 h / until resumed, "Hide model name", the shortcuts and the Discord status. It is created when opened and freed when closed (about 4 MB while open), docks 12 px from the taskbar on any edge (also when the icon is in the hidden-icons flyout; 12 px from the screen edge when the taskbar auto-hides), and closes with `Escape` or a click elsewhere. The app draws its own notification-area icon for this. macOS keeps a native menu with the same entries.
+- New OLED theme: the dark palette on pure black, with surfaces set apart by borders.
+- One palette everywhere: the title bar (Windows 11), the window and panel borders and the Discord preview take the theme's colours instead of Windows' or Discord's.
+- The theme choice is stored in `theme.txt` in the data folder; it starts on Dark.
+- `--settings` opens the settings window at launch. The installer's Start menu shortcut and its "Run" option use it.
+- Launching the app while it already runs opens its settings window instead of doing nothing.
+- Animations: page changes fade in, the sidebar highlight slides to the current page, the limit bars and the daily chart grow, switches and the theme and idle selectors slide, and buttons fade on hover and press. They follow Windows' "Animation effects" and macOS' "Reduce motion" settings.
+- The interface uses the Geist font, embedded in the app (SIL Open Font License 1.1), so Windows and macOS look the same. Text is 1 px larger than before, slightly heavier on the dark themes, and secondary text is brighter. Custom status tokens and the status line field use Cascadia Mono on Windows 11.
+- "Hide model name" also hides the project name, and the Discord preview now shows it.
+- `npm run build` replaces the `tauri:build` scripts on both platforms and no longer needs `npm ci`. The Windows installer comes from `installer/windows.nsi`; its install folder, Start menu shortcut and uninstall key match Tauri's template, so it upgrades earlier installs in place. It also deletes the old web view caches (about 100 MB). The macOS bundle and DMG are assembled by `scripts/build.js`.
+- The version is read from `src-tauri/Cargo.toml` only; `package.json` no longer has one.
+- CI also lints and tests on macOS.
+- The README carries the "Made with Slint" badge required by Slint's royalty-free license.
+
+### Removed
+
+- Hover details on the daily chart bars, and inserting a custom status value at the caret: values are appended at the end.
+
+### Fixed
+
+- The model and effort of a Codex sub-agent (for example a `gpt-5.6-luna` worker or a review thread) no longer replace the model you picked. Only threads you drive are read.
+- The model and effort are found during a long turn, and the newest turn wins even when Windows has not updated the session file's date yet.
+- The project name is detected again with recent Codex versions, whose session header grew past the 8 KB that were read.
+- The project and "Clear when idle" follow the thread Codex last wrote to, using the time on each line instead of the file date, which Windows can leave at the thread's creation. Work done by sub-agents counts as activity.
+- The "Start on Windows" switch shows the real setting again after a failed change.
+- A change made just before "Quit" is saved.
+- Only the CLI running no longer shows "CLI + Desktop": the background service recent Codex CLI versions start (`app-server-daemon`) is not counted as Codex Desktop.
+
 ## [0.5.1] - 2026-09-29
 
 ### Changed

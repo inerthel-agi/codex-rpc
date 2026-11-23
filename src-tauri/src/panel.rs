@@ -237,7 +237,9 @@ fn icon_handle(
     height: u32,
 ) -> windows::core::Result<windows::Win32::UI::WindowsAndMessaging::HICON> {
     let bgra: Vec<u8> = rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|px| [px[2], px[1], px[0], px[3]])
         .collect();
     // The alpha channel draws the shape; the AND mask (1 bit per pixel, rows padded to 16 bits) stays clear.
